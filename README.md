@@ -31,6 +31,8 @@ payload, latency, timestamp, correlation ID (`request_id`), dan arah traffic.
 
 Cerita lengkap proyek ini — tahap, masalah, dan solusinya, dengan istilah teknis yang dijelaskan
 dalam bahasa sederhana: [`docs/laporan-perjalanan.md`](docs/laporan-perjalanan.md).
+Konteks untuk sesi Claude Code: [`CLAUDE.md`](CLAUDE.md); log kerja bersama Windows ↔ Kali:
+[`docs/collab-log.md`](docs/collab-log.md).
 
 ---
 
