@@ -1,0 +1,15 @@
+# Source of truth for the lab's Python environment (Windows and Kali).
+#   conda env create -f environment.yml
+#   conda activate api-observability
+name: api-observability
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - fastapi
+  - uvicorn
+  - httpx
+  - pydantic>=2
+  - python-dotenv
+  - cryptography   # used from Phase 3 (Fernet); installed now so the env does not change later
+  - pytest

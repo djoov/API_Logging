@@ -1,0 +1,9 @@
+.env
+logs/*
+!logs/.gitkeep
+secrets/
+*.pcap
+*.pcapng
+__pycache__/
+.pytest_cache/
+.venv/
