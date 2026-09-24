@@ -14,6 +14,15 @@ Format:
 
 ---
 
+## 2026-09-24 21:38 (WIB) — windows — Gateway Fase 4 JALAN, silakan kirim prompt dari Kali
+- Dilakukan: firewall rule TCP 8443 (Ethernet 2, LocalSubnet) sudah dibuat user dan diverifikasi.
+  Jalan di Windows: mock Ollama `127.0.0.1:11434` (model `mock-llm`), gateway
+  `https://192.168.56.1:8443` (tcp_nodelay on, keep_alive 5 s), observer `--filter "tcp port 8443"`
+  di Ethernet 2 → `logs/phase4-api-events.jsonl`, aktif ±30 menit sejak 21:37.
+- Hasil: `/health` gateway via `192.168.56.1` = 200; mock `/api/tags` = `mock-llm:latest`.
+- Butuh dari kali: jalankan observer Kali (`--filter "tcp port 8443"`, tunggu "Capturing on"), lalu
+  `python client/llm_client.py --count 3 --delay 5 --keep-alive 10`. Catat hasil di sini.
+
 ## 2026-09-24 21:00 (WIB) — windows — Fase 4 siap untuk uji lintas host
 - Dilakukan: gateway HTTPS Ollama, LLM client, mock Ollama, observer membawa field `llm`; README §18.
   Commit `66df21a`.
