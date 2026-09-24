@@ -112,6 +112,15 @@ class Settings:
     server_tcp_nodelay: bool  # disable Nagle on accepted connections (experiment switch)
     server_keep_alive: int  # seconds an idle keep-alive connection stays open (uvicorn default 5)
     client_keep_alive: float  # seconds the traffic generator keeps an idle connection (httpx default 5)
+    # Phase 4: Ollama over an HTTPS gateway
+    ollama_url: str  # where the gateway forwards to; keep it on 127.0.0.1
+    gateway_host: str
+    gateway_port: int
+    llm_target_url: str | None  # gateway URL the LLM client talks to
+    llm_model: str
+    llm_timeout: float  # LLM answers can take minutes
+    observer_incomplete_timeout: float  # how long a request may wait for its first response byte
+    observer_tls_idle: float  # idle time that ends a TLS exchange seen without an app log
     env_file: Path | None
 
     @property
@@ -164,5 +173,13 @@ def load_settings() -> Settings:
         server_tcp_nodelay=_get_bool("SERVER_TCP_NODELAY", False),
         server_keep_alive=_get_int("SERVER_KEEP_ALIVE_SECONDS", 5),
         client_keep_alive=_get_float("CLIENT_KEEP_ALIVE_SECONDS", 5.0),
+        ollama_url=_get_str("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/"),
+        gateway_host=_get_str("GATEWAY_HOST", "0.0.0.0"),
+        gateway_port=_get_int("GATEWAY_PORT", 8443),
+        llm_target_url=_get_str("LLM_TARGET_URL") or None,
+        llm_model=_get_str("LLM_MODEL", "mock-llm"),
+        llm_timeout=_get_float("LLM_TIMEOUT_SECONDS", 600.0),
+        observer_incomplete_timeout=_get_float("OBSERVER_INCOMPLETE_TIMEOUT_SECONDS", 30.0),
+        observer_tls_idle=_get_float("OBSERVER_TLS_IDLE_SECONDS", 2.0),
         env_file=env_file,
     )

@@ -27,6 +27,8 @@ from observer.tls_flows import TlsExchange, TlsExchangeTracker
 
 # A TLS exchange and an app-log entry on the same connection must start within this many seconds.
 TLS_MATCH_TOLERANCE_S = 5.0
+CLIENT_RECORD_TYPES = ("client_exchange", "llm_client_exchange")
+SERVER_RECORD_TYPES = ("server_exchange", "llm_gateway_exchange")
 # App logs (ms precision) and capture timestamps on one host agreed within ~1 ms in the lab.
 CLOCK_TOLERANCE_S = 0.002
 
@@ -60,11 +62,14 @@ class _Pending:
 class ExchangeCorrelator:
     def __init__(self, node_name: str, peer_names: dict[str, str] | None = None,
                  merge_window: float = 2.0, incomplete_timeout: float = 30.0,
-                 server_port: int | None = None) -> None:
+                 server_port: int | None = None, tls_idle: float | None = None) -> None:
         self.node_name = node_name
         self.peer_names = peer_names or {}
         self.merge_window = merge_window
         self.incomplete_timeout = incomplete_timeout
+        # Idle time that ends a TLS exchange nobody logged. LLM answers can pause between
+        # streamed pieces, so Phase 4 uses a longer value than the plain API lab.
+        self.tls_idle = merge_window if tls_idle is None else tls_idle
         self._pending: dict[str, _Pending] = {}
         self._frame_to_key: dict[int, str] = {}  # capture request frame -> key (fallback pairing)
         self.tls = TlsExchangeTracker(server_port)
@@ -73,7 +78,7 @@ class ExchangeCorrelator:
     # ---- evidence input -------------------------------------------------
 
     def add_client_record(self, rec: dict[str, Any]) -> None:
-        if rec.get("record_type") != "client_exchange" or not rec.get("request_id"):
+        if rec.get("record_type") not in CLIENT_RECORD_TYPES or not rec.get("request_id"):
             return
         entry = self._entry(rec["request_id"])
         entry.evidence.add("client_log")
@@ -100,11 +105,12 @@ class ExchangeCorrelator:
             "tls_cipher": rec.get("tls_cipher"),
         })
         self._merge_payload(entry, rec.get("payload"))
+        self._merge_llm(entry, rec.get("llm"))
         if rec.get("status_code") is None:
             entry.fields["failed"] = True  # request never got a response; flush without waiting
 
     def add_server_record(self, rec: dict[str, Any]) -> None:
-        if rec.get("record_type") != "server_exchange" or not rec.get("request_id"):
+        if rec.get("record_type") not in SERVER_RECORD_TYPES or not rec.get("request_id"):
             return
         entry = self._entry(rec["request_id"])
         entry.evidence.add("server_log")
@@ -126,6 +132,7 @@ class ExchangeCorrelator:
             "transport": rec.get("transport"),
         })
         self._merge_payload(entry, rec.get("payload"))
+        self._merge_llm(entry, rec.get("llm"))
 
     def add_capture_record(self, rec: CaptureRecord) -> None:
         if rec.kind.startswith("tls_"):
@@ -190,7 +197,7 @@ class ExchangeCorrelator:
         now = time.monotonic()
         done: list[dict[str, Any]] = []
         self._tls_ready += [(ex, now) for ex in
-                            self.tls.expire(self.merge_window, self.incomplete_timeout, force)]
+                            self.tls.expire(self.tls_idle, self.incomplete_timeout, force)]
 
         due = [key for key, entry in self._pending.items() if force or self._is_due(entry, now)]
         # 1) An app entry about to be emitted gets its TLS evidence first, even if the TLS
@@ -341,6 +348,16 @@ class ExchangeCorrelator:
         target.request_time = target.request_time or entry.request_time
 
     @staticmethod
+    def _merge_llm(entry: _Pending, llm: dict[str, Any] | None) -> None:
+        """Phase 4: prompt/answer/timing from the LLM client and/or the gateway, gaps filled."""
+        if not llm:
+            return
+        current = entry.fields.setdefault("llm", {})
+        for key, value in llm.items():
+            if value is not None and current.get(key) is None:
+                current[key] = value
+
+    @staticmethod
     def _merge_payload(entry: _Pending, payload: dict[str, Any] | None) -> None:
         if not payload:
             return
@@ -417,5 +434,6 @@ class ExchangeCorrelator:
             tls_cipher=f.get("tls_cipher"),
             tls_sni=f.get("tls_sni"),
             capture_match=capture_match,
+            llm=f.get("llm"),
         )
         return event.to_record()

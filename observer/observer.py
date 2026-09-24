@@ -115,6 +115,19 @@ def _log_event(event: dict[str, Any]) -> None:
              sender, receiver, event.get("transport") or "?", tls, request,
              event["status_code"] if event["status_code"] is not None else "?", latency,
              event["request_id"] or "?", ",".join(event["evidence"]), match)
+    llm = event.get("llm")
+    if llm:
+        ttft = llm.get("client_ttft_ms") if llm.get("client_ttft_ms") is not None else llm.get("gateway_ttft_ms")
+        log.info('         LLM model=%s ttft=%s tokens=%s tok/s=%s load=%s',
+                 llm.get("model"), f"{ttft:.0f}ms" if ttft is not None else "-", llm.get("response_tokens"),
+                 llm.get("tokens_per_s"), f"{llm['ollama_load_ms']:.0f}ms" if llm.get("ollama_load_ms") else "-")
+        log.info('         PROMPT   "%s"', _one_line(llm.get("prompt")))
+        log.info('         RESPONSE "%s"', _one_line(llm.get("response")))
+
+
+def _one_line(text: str | None, limit: int = 160) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _server_port(settings: Settings, bpf_filter: str) -> int:
@@ -126,7 +139,8 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
     node = args.node_name.lower()
     server_port = _server_port(settings, args.filter)
     correlator = ExchangeCorrelator(node, settings.peer_names, settings.merge_window_seconds,
-                                    server_port=server_port)
+                                    incomplete_timeout=settings.observer_incomplete_timeout,
+                                    server_port=server_port, tls_idle=settings.observer_tls_idle)
     use_app = args.mode in ("app", "both") and args.read_pcap is None
     use_capture = args.mode in ("capture", "both") and not args.replay
     finite = args.replay or args.read_pcap is not None  # run to completion instead of tailing

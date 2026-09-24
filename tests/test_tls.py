@@ -130,7 +130,7 @@ def test_tcp_nodelay_listener_reaches_accepted_connections(settings: Settings, c
                                                           monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio.base_events as base_events
 
-    from server.api_server import _listening_socket
+    from server.api_server import make_listening_socket
 
     seen: list[int] = []
     original = base_events._set_nodelay
@@ -141,7 +141,7 @@ def test_tcp_nodelay_listener_reaches_accepted_connections(settings: Settings, c
 
     monkeypatch.setattr(base_events, "_set_nodelay", spy)
     port = _free_port()
-    listener = _listening_socket("127.0.0.1", port, tcp_nodelay=True)
+    listener = make_listening_socket("127.0.0.1", port, tcp_nodelay=True)
     server = uvicorn.Server(uvicorn.Config(create_app(settings), log_level="warning", timeout_keep_alive=10,
                                            ssl_certfile=str(certs / "local.pem"),
                                            ssl_keyfile=str(certs / "local.key")))

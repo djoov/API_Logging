@@ -117,6 +117,9 @@ class ApiExchangeEvent(BaseModel):
     # How wire evidence was tied to this exchange: "request_id" (plaintext header),
     # "4tuple_time" (TLS: same connection + close in time), or None (no capture / unmatched).
     capture_match: str | None = None
+    # Phase 4 (Ollama): model, full prompt and answer, time to first token, token statistics.
+    # Filled only from the app logs of the LLM client / gateway, never from encrypted capture.
+    llm: dict[str, Any] | None = None
 
     def to_record(self) -> dict[str, Any]:
         return self.model_dump(mode="json")

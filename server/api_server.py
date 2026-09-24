@@ -158,7 +158,7 @@ def _parse_args(settings: Settings, argv: list[str] | None) -> argparse.Namespac
     return parser.parse_args(argv)
 
 
-def _listening_socket(host: str, port: int, tcp_nodelay: bool) -> socket.socket:
+def make_listening_socket(host: str, port: int, tcp_nodelay: bool) -> socket.socket:
     """Bind the listening socket ourselves so TCP_NODELAY can be set on it.
 
     Accepted connections inherit TCP_NODELAY from the listening socket (checked on Windows and
@@ -215,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         sockets = None
         if args.tcp_nodelay:
-            sockets = [_listening_socket(settings.app_host, settings.app_port, tcp_nodelay=True)]
+            sockets = [make_listening_socket(settings.app_host, settings.app_port, tcp_nodelay=True)]
         uvicorn.Server(config).run(sockets=sockets)
     except OSError as exc:
         log.error("SERVER cannot listen on %s:%s: %s", settings.app_host, settings.app_port, exc)

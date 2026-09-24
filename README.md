@@ -27,6 +27,7 @@ payload, latency, timestamp, correlation ID (`request_id`), dan arah traffic.
 15. [Fase 2: HTTPS/TLS](#15-fase-2-httpstls)
 16. [Eksperimen transport (Run A–D)](#16-eksperimen-transport-jeda-40-ms-dan-koneksi-baru-per-request)
 17. [Roadmap application-layer encryption](#17-roadmap-fase-3-application-layer-encryption-fernet)
+18. [Fase 4: Ollama lewat HTTPS gateway](#18-fase-4-ollama-lewat-https-gateway-prompt--jawaban-di-kedua-host)
 
 Cerita lengkap proyek ini — tahap, masalah, dan solusinya, dengan istilah teknis yang dijelaskan
 dalam bahasa sederhana: [`docs/laporan-perjalanan.md`](docs/laporan-perjalanan.md).
@@ -73,11 +74,15 @@ api-observability-lab/
 ├── models/schemas.py           # skema Pydantic request/response/event
 ├── server/api_server.py        # FastAPI: GET /health, POST /api/test
 ├── client/traffic_generator.py # generator traffic dengan count + delay
+├── client/llm_client.py        # FASE 4: kirim prompt ke Ollama lewat gateway
 ├── observer/
 │   ├── observer.py             # entry point observer
 │   ├── capture_backend.py      # abstraksi TShark / tcpdump (HTTP + TLS)
 │   ├── tls_flows.py            # FASE 2: rekonstruksi exchange dari record TLS terenkripsi
 │   └── correlator.py           # penggabungan bukti per request_id / 4-tuple
+├── gateway/ollama_gateway.py   # FASE 4: HTTPS gateway di depan Ollama (log prompt & jawaban)
+├── llm/ollama_protocol.py      # FASE 4: membaca format streaming Ollama
+├── tools/mock_ollama.py        # FASE 4: pengganti Ollama untuk lab tanpa model
 ├── security/
 │   ├── tls_certs.py            # FASE 2: CA lab + sertifikat server
 │   └── payload_crypto.py       # FASE 3: interface Fernet (belum dipakai)
@@ -694,3 +699,106 @@ Rencana integrasi:
 3. Server mendekripsi dengan key yang sah, lalu memvalidasi isi dengan `ApiTestRequest`.
 4. Ekspektasi observasi: bahkan pihak yang melihat body setelah TLS terminate (mis. reverse proxy,
    log middleware) hanya melihat ciphertext; hanya pemilik key yang melihat payload asli.
+
+## 18. Fase 4: Ollama lewat HTTPS gateway (prompt & jawaban di kedua host)
+
+Lanjutan dari POC awal (Ubuntu → Ollama di Windows lewat HTTP polos, `POST /api/generate`, capture
+TShark). Sekarang traffic LLM **terenkripsi (HTTPS)** di jaringan, tetapi **prompt dan jawaban
+lengkap tetap tercatat di kedua host** — di titik-titik yang memang sah melihat plaintext: client
+(sebelum enkripsi) dan gateway (pemilik sertifikat server, setelah TLS dibuka). Lingkup: lab
+pribadi, tidak keluar dari jaringan lokal.
+
+```
+ CLIENT HOST (Kali VM / Ubuntu PC)                 GATEWAY HOST (Windows laptop / Windows PC)
+ client/llm_client.py ──HTTPS :8443──▶ gateway/ollama_gateway.py ──HTTP──▶ Ollama 127.0.0.1:11434
+   log: prompt + jawaban (client-events)      log: prompt + jawaban (server-events)   (atau tools/mock_ollama.py)
+ observer: app log + capture TLS             observer: app log + capture TLS
+```
+
+| Titik | Prompt & jawaban | Waktu, arah, ukuran |
+|---|---|---|
+| Log LLM client | ✔ | ✔ (+ TTFT dari sisi client) |
+| Log gateway | ✔ | ✔ (+ TTFT dari sisi gateway, statistik Ollama) |
+| Capture jaringan (TLS) | ✘ | ✔ — termasuk **ukuran tiap potongan streaming** |
+
+### 18.1 Komponen
+| File | Fungsi |
+|---|---|
+| `gateway/ollama_gateway.py` | HTTPS reverse proxy di depan Ollama; `POST /api/generate`, `POST /api/chat`, `GET /api/tags`, `GET /api/version`. Meneruskan streaming apa adanya, menyusun jawaban lengkap untuk log. `--tcp-nodelay` **aktif default** (lihat §16). |
+| `client/llm_client.py` | Kirim prompt (`--prompt`, `--prompts-file`), `--endpoint generate\|chat`, `--stream/--no-stream`, `--count`, `--delay`; jawaban tampil live di terminal. Tanpa retry otomatis. |
+| `llm/ollama_protocol.py` | Membaca format Ollama (NDJSON streaming / JSON tunggal) + statistik (`eval_count`, `load_duration`, …). |
+| `tools/mock_ollama.py` | Pengganti Ollama untuk lab tanpa model/GPU (laptop ini). Jawabannya teks tiruan bertanda `[SIMULASI mock-ollama]`. |
+| `scripts/run_llm_demo.ps1` | Smoke test satu mesin (mock + gateway + observer + client), opsi `-Capture`, `-NoStream`, `-RealOllama`. |
+
+### 18.2 Lingkungan A — sekarang: laptop Windows + VM Kali (Host-Only)
+**Windows (gateway host)**, `.env` tambahan:
+```ini
+OLLAMA_URL=http://127.0.0.1:11434
+GATEWAY_HOST=192.168.56.1
+GATEWAY_PORT=8443
+OBSERVER_TLS_IDLE_SECONDS=30
+OBSERVER_INCOMPLETE_TIMEOUT_SECONDS=900
+```
+```powershell
+python tools/mock_ollama.py                       # atau Ollama asli (ollama serve)
+python gateway/ollama_gateway.py
+python observer/observer.py --filter "tcp port 8443"
+# firewall (Administrator), hanya di adapter lab:
+New-NetFirewallRule -DisplayName "API Observability Lab TCP 8443" -Direction Inbound -Protocol TCP `
+    -LocalPort 8443 -InterfaceAlias "Ethernet 2" -RemoteAddress LocalSubnet -Action Allow -Profile Any
+```
+Sertifikat `secrets/windows.pem` sudah memuat `192.168.56.1`.
+
+**Kali (client host)**, `.env` tambahan:
+```ini
+LLM_TARGET_URL=https://192.168.56.1:8443
+LLM_MODEL=mock-llm
+OBSERVER_TLS_IDLE_SECONDS=30
+OBSERVER_INCOMPLETE_TIMEOUT_SECONDS=900
+```
+```bash
+python observer/observer.py --filter "tcp port 8443"
+python client/llm_client.py --prompt "Jelaskan TCP handshake" --count 3 --delay 5 --keep-alive 10
+```
+
+### 18.3 Lingkungan B — nanti: PC Windows (Ollama) + PC Ubuntu, satu LAN
+Sama seperti A, dengan perbedaan:
+1. **IP tetap**: buat *DHCP reservation* di router untuk kedua PC (atau IP statis), karena IP masuk ke
+   SAN sertifikat.
+2. **Sertifikat baru** untuk IP LAN PC Windows (di host yang memegang `ca.key`):
+   `python scripts/make_certs.py server --name windows-pc --ip <IP_PC_WINDOWS>`; salin `ca.pem` ke Ubuntu.
+3. **Ollama asli tetap di `127.0.0.1`** — jangan set `OLLAMA_HOST=0.0.0.0` (di POC awal Ollama dibuka
+   langsung ke jaringan; sekarang hanya gateway yang terbuka). `LLM_MODEL` = model yang sudah di-*pull*.
+4. **Firewall** Windows untuk 8443 dibatasi ke IP Ubuntu: `-RemoteAddress <IP_UBUNTU>` (bukan
+   `LocalSubnet` jika LAN dipakai orang lain).
+5. Ubuntu: `sudo apt install tshark`, tambahkan user ke grup `wireshark` (lihat §8).
+
+### 18.4 Metrik LLM
+| Field (`event.llm`) | Arti |
+|---|---|
+| `prompt`, `response` | teks lengkap (jawaban streaming disambung) |
+| `client_ttft_ms` | *time to first token* dilihat client: kirim → potongan teks pertama |
+| `gateway_ttft_ms` | TTFT dilihat gateway (tanpa jaringan client↔gateway) |
+| `ollama_load_ms` | waktu memuat model = *cold start* sebenarnya |
+| `response_tokens`, `tokens_per_s` | dari statistik Ollama (`eval_count`, `eval_duration`) |
+| `client_total_ms`, `gateway_total_ms` | total waktu sampai jawaban selesai |
+
+`wire_ttfb_ms` di event adalah waktu sampai **header HTTP** response lewat di jaringan — gateway
+mengirim header begitu Ollama mulai merespons, jadi ini **bukan** token pertama. Untuk token
+pertama pakai `llm.client_ttft_ms`.
+
+### 18.5 Temuan awal (smoke test satu mesin, mock)
+- Prompt dan jawaban identik di log client dan gateway, `request_id` sama, TLS 1.3.
+- *Cold start* terlihat: request pertama TTFT ~570–650 ms (`ollama_load_ms`=500, simulasi), berikutnya ~25–40 ms.
+- **Setiap potongan streaming = satu TLS record terenkripsi (~125–135 B)**. Isi tidak terbaca, tetapi
+  jumlah dan ukuran potongan (≈ panjang token) terlihat oleh siapa pun yang merekam jaringan
+  (*token-length side channel*).
+- TShark bisa butuh >15 detik untuk mulai merekam; `run_llm_demo.ps1` menunggu sampai "Capturing on"
+  sebelum mengirim prompt.
+
+### 18.6 Keterbatasan
+- Mock Ollama tidak menjalankan model sungguhan; waktu dan token-nya tiruan.
+- `GET /health` gateway tidak dicatat sebagai exchange LLM, sehingga di capture muncul sebagai
+  exchange terenkripsi tanpa log (sama seperti Fase 2).
+- Prompt dan jawaban disimpan **utuh** di `logs/` (disengaja untuk penelitian). `logs/` tidak di-commit;
+  jangan pakai data sensitif sungguhan di luar lab.
