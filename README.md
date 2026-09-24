@@ -28,7 +28,8 @@ payload, latency, timestamp, correlation ID (`request_id`), dan arah traffic.
 16. [Eksperimen transport (Run A–D)](#16-eksperimen-transport-jeda-40-ms-dan-koneksi-baru-per-request)
 17. [Roadmap application-layer encryption](#17-roadmap-fase-3-application-layer-encryption-fernet)
 
-Cerita lengkap proyek ini dalam bahasa non-teknis: [`docs/laporan-perjalanan.md`](docs/laporan-perjalanan.md).
+Cerita lengkap proyek ini — tahap, masalah, dan solusinya, dengan istilah teknis yang dijelaskan
+dalam bahasa sederhana: [`docs/laporan-perjalanan.md`](docs/laporan-perjalanan.md).
 
 ---
 
