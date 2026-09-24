@@ -6,8 +6,11 @@ server answers, then the next request may follow. So, per TCP connection:
   server application-data record(s)  -> the response to the open request
   next client record after a response -> the previous exchange is finished
 
-TLS 1.3 session tickets: the server's first encrypted record after the handshake is a
-NewSessionTicket, not a response, even when it arrives after the first request was sent.
+TLS 1.3 handshake tail and session tickets: encrypted server records before the client's
+Finished are still handshake, and the server's first encrypted flight after it is a
+NewSessionTicket, not a response - even when it arrives after (or in the middle of) the
+first request. Both were observed on the real Host-Only link (MTU 1500), not on loopback.
+Assumes an OpenSSL-style client that sends ChangeCipherSpec before its Finished.
 
 What this cannot know: method, URI, status, headers, request_id - those are encrypted.
 Only timing and encrypted sizes are available. Record sizes include TLS overhead
@@ -35,7 +38,8 @@ class TlsExchange:
     tcp_stream: int | None
     request_time: float  # capture epoch seconds
     request_bytes: int
-    response_time: float | None = None
+    response_time: float | None = None  # first response record (time to first byte)
+    response_end_time: float | None = None  # last response record (response complete)
     response_bytes: int = 0
     tls_version: str | None = None
     tls_cipher: str | None = None
@@ -48,6 +52,15 @@ class TlsExchange:
 
     @property
     def wire_latency_ms(self) -> float | None:
+        """Request start -> last response record: what the client actually waits for."""
+        if self.response_end_time is None:
+            return None
+        return round((self.response_end_time - self.request_time) * 1000, 3)
+
+    @property
+    def wire_ttfb_ms(self) -> float | None:
+        """Request start -> first response record. Can be much smaller than wire_latency_ms
+        when the response is split (e.g. headers and body) and the second part is delayed."""
         if self.response_time is None:
             return None
         return round((self.response_time - self.request_time) * 1000, 3)
@@ -59,9 +72,13 @@ class _Flow:
     tls_cipher: str | None = None
     tls_sni: str | None = None
     current: TlsExchange | None = None
-    # TLS 1.3 servers send NewSessionTicket(s) as encrypted records right after the handshake.
-    # They can arrive before OR after the first request, so they are skipped by position,
-    # not by timing. Assumes one ticket flight per connection (OpenSSL/Python ssl default).
+    # Between ServerHello and the client's Finished, encrypted server records are still the
+    # handshake (EncryptedExtensions, Certificate, ... ). On a real NIC (MTU 1500) they often
+    # arrive in a separate frame from the ServerHello, so they must not count as data.
+    in_handshake: bool = False
+    # TLS 1.3 servers then send NewSessionTicket(s) as encrypted records. They can arrive
+    # before OR after (even in the middle of) the first request, so they are skipped by
+    # position, not by timing. Assumes one ticket flight per connection (OpenSSL default).
     expect_ticket: bool = False
 
 
@@ -98,7 +115,11 @@ class TlsExchangeTracker:
             return []
         if rec.kind == "tls_server_hello":
             flow.tls_version, flow.tls_cipher = rec.tls_version, rec.tls_cipher
+            flow.in_handshake = True
             flow.expect_ticket = rec.tls_version == "TLSv1.3"
+            return []
+        if rec.kind == "tls_handshake" and from_client:
+            flow.in_handshake = False  # client ChangeCipherSpec/Finished ends the handshake
             return []
         if rec.kind != "tls_app_data":
             return []  # other handshake records and plaintext alerts
@@ -120,6 +141,9 @@ class TlsExchangeTracker:
                 )
             return finished
 
+        if flow.in_handshake or size < MIN_REQUEST_BYTES:
+            self.ignored_server_records += 1  # encrypted handshake, or alert-sized (close_notify)
+            return []
         if flow.expect_ticket:
             flow.expect_ticket = False
             self.ignored_server_records += 1
@@ -129,6 +153,7 @@ class TlsExchangeTracker:
             return []
         if current.response_time is None:
             current.response_time = rec.timestamp
+        current.response_end_time = rec.timestamp
         current.response_bytes += size
         current.last_update = time.monotonic()
         return []

@@ -108,6 +108,8 @@ class ApiExchangeEvent(BaseModel):
     payload: PayloadMetadata = Field(default_factory=PayloadMetadata)
     error: str | None = None
     # Phase 2
+    # TLS only: request start -> FIRST response record. wire_latency_ms is to the LAST record.
+    wire_ttfb_ms: float | None = None
     transport: str | None = None  # "http" or "https"
     tls_version: str | None = None
     tls_cipher: str | None = None

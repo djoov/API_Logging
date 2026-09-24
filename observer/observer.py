@@ -106,9 +106,15 @@ def _log_event(event: dict[str, Any]) -> None:
     latency = f"{event['latency_ms']:.1f}ms ({event['latency_source']})" if event["latency_ms"] is not None else "n/a"
     tls = f" {event['tls_version']}" if event.get("tls_version") else ""
     match = f" match={event['capture_match']}" if event.get("capture_match") else ""
-    log.info("OBSERVED %s -> %s [%s%s] %s %s status=%s latency=%s request_id=%s evidence=%s%s",
-             sender, receiver, event.get("transport") or "?", tls, event["method"], event["endpoint"],
-             event["status_code"], latency, event["request_id"], ",".join(event["evidence"]), match)
+    if event["method"] is None and event["evidence"] == ["capture_tls"]:
+        # Encrypted exchange with no app log on this host: the HTTP details are simply not visible.
+        request = f"<encrypted {event['request_bytes']}B -> {event['response_bytes']}B>"
+    else:
+        request = f"{event['method']} {event['endpoint']}"
+    log.info("OBSERVED %s -> %s [%s%s] %s status=%s latency=%s request_id=%s evidence=%s%s",
+             sender, receiver, event.get("transport") or "?", tls, request,
+             event["status_code"] if event["status_code"] is not None else "?", latency,
+             event["request_id"] or "?", ",".join(event["evidence"]), match)
 
 
 def _server_port(settings: Settings, bpf_filter: str) -> int:

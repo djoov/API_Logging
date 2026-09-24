@@ -574,7 +574,7 @@ Uji manual dari Kali: `curl --cacert secrets/ca.pem https://192.168.56.1:8000/he
 | Yang diamati | Fase 1 (HTTP) | Fase 2 (HTTPS) |
 |---|---|---|
 | IP, port, TCP stream | terlihat di kabel | terlihat di kabel |
-| Waktu request/response (`wire_latency_ms`) | terlihat | **terlihat** (dari timing record terenkripsi) |
+| Waktu request/response (`wire_latency_ms`) | terlihat | **terlihat** (dari timing record terenkripsi): sampai record response *terakhir*; `wire_ttfb_ms` = sampai record *pertama* |
 | Ukuran request/response | ukuran HTTP | ukuran record TLS (≈ HTTP + ~17 B overhead per record) — **ukuran tetap bocor** |
 | Versi TLS, cipher | – | terlihat (ServerHello), mis. `TLSv1.3`, `TLS_AES_256_GCM_SHA384` |
 | SNI | – | kosong, karena client memakai IP (akan terlihat jika memakai hostname) |

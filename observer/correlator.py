@@ -202,7 +202,10 @@ class ExchangeCorrelator:
         waiting: list[tuple[TlsExchange, float]] = []
         for ex, since in self._tls_ready:
             entry = self._best_entry_for(ex)
-            if entry is not None:
+            # Mutual best only: on a keep-alive connection an earlier exchange with no app log
+            # (e.g. the client's /health check) must not grab the log entry of the next request
+            # while that request's own exchange is still in progress.
+            if entry is not None and self._best_tls_match(entry, self._all_tls_candidates()) is ex:
                 self._attach_tls(entry, ex)
             elif force or now - since >= self.merge_window:
                 done.append(self._build_event(self._capture_only_entry(ex)))
@@ -251,6 +254,10 @@ class ExchangeCorrelator:
         scored = [(d, e) for e in self._pending.values() if (d := self._tls_distance(e, ex)) is not None]
         return min(scored, key=lambda item: item[0])[1] if scored else None
 
+    def _all_tls_candidates(self) -> list[TlsExchange]:
+        """Finished exchanges plus the ones still in progress on each connection."""
+        return [ex for ex, _ in self._tls_ready] + self.tls.in_progress()
+
     def _consume_tls(self, ex: TlsExchange) -> None:
         self._tls_ready = [(e, s) for e, s in self._tls_ready if e is not ex]
         self.tls.take(ex)
@@ -268,6 +275,7 @@ class ExchangeCorrelator:
             "request_bytes": ex.request_bytes,
             "response_bytes": ex.response_bytes if ex.has_response else None,
             "wire_latency_ms": ex.wire_latency_ms,
+            "wire_ttfb_ms": ex.wire_ttfb_ms,
             "transport": "https",
             "tls_version": ex.tls_version,
             "tls_cipher": ex.tls_cipher,
@@ -362,6 +370,7 @@ class ExchangeCorrelator:
             client_rtt_ms=f.get("client_rtt_ms"),
             server_processing_ms=f.get("server_processing_ms"),
             wire_latency_ms=f.get("wire_latency_ms"),
+            wire_ttfb_ms=f.get("wire_ttfb_ms"),
             request_id=f.get("request_id"),
             tcp_stream=f.get("tcp_stream"),
             request_bytes=f.get("request_bytes"),

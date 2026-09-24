@@ -196,6 +196,66 @@ def test_session_ticket_after_first_request_is_not_the_response() -> None:
     assert health["response_bytes"] == 249 + 32  # the 500-byte ticket is excluded
 
 
+def test_real_two_host_session_has_no_phantom_exchanges() -> None:
+    # Real Windows<->Kali HTTPS session over the Host-Only link (MTU 1500), seen from Windows.
+    # Regression: on a real NIC the server's encrypted handshake tail arrives in its own frame;
+    # it used to be taken for the session ticket, so the real ticket became a "response",
+    # splitting requests into phantom exchanges and giving wire < server processing.
+    corr = ExchangeCorrelator("windows", {"192.168.56.1": "windows", "192.168.56.10": "kali"},
+                              merge_window=0, server_port=8000)
+    for rec in _load("twohost_tls_client.jsonl"):
+        corr.add_client_record(rec)
+    for rec in _load("twohost_tls_server.jsonl"):
+        corr.add_server_record(rec)
+    for rec in _replay_capture("twohost_tls_capture.jsonl"):
+        corr.add_capture_record(rec)
+    events = [e for e in corr.flush(force=True) if "capture_tls" in e["evidence"]]
+
+    capture_only = [e for e in events if e["evidence"] == ["capture_tls"]]
+    assert len(events) == 12 and len(capture_only) == 1  # only the client's /health to Kali has no app log
+    assert capture_only[0]["direction"] == "windows_to_kali"
+    for e in events:
+        if e["vantage"] == "server_side":
+            assert e["wire_latency_ms"] >= e["server_processing_ms"], e
+        if e["vantage"] == "client_side" and e["client_rtt_ms"] is not None:
+            assert e["wire_latency_ms"] <= e["client_rtt_ms"], e
+    posts = [e for e in events if e["endpoint"] == "/api/test"]
+    assert len(posts) == 10
+    assert {e["request_bytes"] for e in posts} == {472}  # headers + body, never split
+
+    # Kali request #1: response headers left Windows after ~3.9 ms but the body only ~48 ms
+    # after the request (Kali's own client measured 49.2 ms). wire_latency_ms must cover the
+    # whole response; the first-byte time is kept separately.
+    [first] = [e for e in posts if e["request_id"] == "edd0a90b-48cf-416e-a18e-503acd14d602"]
+    assert abs(first["wire_ttfb_ms"] - 3.92) < 0.1
+    assert abs(first["wire_latency_ms"] - 47.93) < 0.1
+
+
+def test_unlogged_exchange_does_not_steal_next_requests_log() -> None:
+    # Real Kali-side bug: /health (no app log on the client host) and POST #1 share one
+    # keep-alive connection. /health finished first and grabbed POST #1's log entry, so POST #1
+    # itself became a "capture-only" exchange. Reproduced incrementally with the real records
+    # of that connection (Windows capture, stream 5), keeping only POST #1's app log.
+    records = [r for r in _replay_capture("twohost_tls_capture.jsonl") if r.tcp_stream == 5]
+    post1_log = [r for r in _load("twohost_tls_server.jsonl")
+                 if r["request_id"] == "edd0a90b-48cf-416e-a18e-503acd14d602"]
+    corr = ExchangeCorrelator("windows", merge_window=60, server_port=8000)
+
+    first_response_part = next(i for i, r in enumerate(records) if r.tls_bytes == 245)
+    for rec in records[:first_response_part]:  # /health done, POST #1 request in progress
+        corr.add_capture_record(rec)
+    corr.add_server_record(post1_log[0])
+    assert corr.flush() == []  # nothing is due yet, and /health must not claim POST #1's log
+    for rec in records[first_response_part:]:
+        corr.add_capture_record(rec)
+    events = corr.flush(force=True)
+
+    [post] = [e for e in events if e["request_id"]]
+    [health] = [e for e in events if not e["request_id"]]
+    assert post["request_bytes"] == 472 and abs(post["wire_latency_ms"] - 47.93) < 0.1
+    assert health["request_bytes"] == 246 and health["evidence"] == ["capture_tls"]
+
+
 def test_tls_tracker_ignores_alert_sized_client_records() -> None:
     tracker = TlsExchangeTracker(server_port=8000)
     rec = CaptureRecord(kind="tls_app_data", timestamp=1.0, backend="t", src_ip="10.0.0.1", src_port=5000,
