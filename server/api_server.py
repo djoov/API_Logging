@@ -97,6 +97,7 @@ def create_app(settings: Settings) -> FastAPI:
             "destination_port": server_addr[1],
             "method": request.method,
             "endpoint": request.url.path,
+            "transport": request.url.scheme,  # "http" or "https"
             "status_code": status_code,
             "server_processing_ms": round(processing_ms, 3),
             "sender": payload.get("sender") or header_sender,
@@ -159,7 +160,22 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(settings, argv)
     settings = replace(settings, app_host=args.host, app_port=args.port, node_name=args.node_name.lower())
 
-    log.info("SERVER node=%s listening on %s:%s", settings.node_name, settings.app_host, settings.app_port)
+    tls_kwargs: dict[str, str] = {}
+    if bool(settings.tls_cert_file) != bool(settings.tls_key_file):
+        log.error("CONFIG ERROR set both TLS_CERT_FILE and TLS_KEY_FILE (or neither for plain HTTP)")
+        return 2
+    if settings.server_tls:
+        assert settings.tls_cert_file and settings.tls_key_file
+        for label, path in (("TLS_CERT_FILE", settings.tls_cert_file), ("TLS_KEY_FILE", settings.tls_key_file)):
+            if not path.is_file():
+                log.error("CONFIG ERROR %s not found: %s (create it with scripts/make_certs.py)", label, path)
+                return 2
+        tls_kwargs = {"ssl_certfile": str(settings.tls_cert_file), "ssl_keyfile": str(settings.tls_key_file)}
+
+    scheme = "https" if tls_kwargs else "http"
+    log.info("SERVER node=%s listening on %s://%s:%s", settings.node_name, scheme, settings.app_host, settings.app_port)
+    if tls_kwargs:
+        log.info("SERVER TLS certificate %s", settings.tls_cert_file)
     log.info("SERVER app events -> %s", settings.log_dir / "server-events.jsonl")
     try:
         uvicorn.run(
@@ -168,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
             port=settings.app_port,
             log_level="warning",  # our middleware already logs every request
             access_log=False,
+            **tls_kwargs,  # type: ignore[arg-type]
         )
     except KeyboardInterrupt:
         pass

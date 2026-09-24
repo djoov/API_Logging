@@ -52,6 +52,15 @@ def _get_float(name: str, default: float) -> float:
         raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
 
 
+def _get_path(name: str) -> Path | None:
+    """Optional file path; relative paths are resolved against the project root."""
+    raw = _get_str(name)
+    if not raw:
+        return None
+    path = Path(raw)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 def parse_peer_names(raw: str) -> dict[str, str]:
     """Parse "192.168.56.1=windows,192.168.56.101=kali" into {ip: name}."""
     peers: dict[str, str] = {}
@@ -86,7 +95,14 @@ class Settings:
     tshark_path: str
     peer_names: dict[str, str]
     merge_window_seconds: float
+    tls_cert_file: Path | None  # server certificate (enables HTTPS on the server)
+    tls_key_file: Path | None
+    tls_ca_file: Path | None  # CA the client trusts when TARGET_SCHEME=https
     env_file: Path | None
+
+    @property
+    def server_tls(self) -> bool:
+        return self.tls_cert_file is not None and self.tls_key_file is not None
 
     @property
     def target_url(self) -> str | None:
@@ -128,5 +144,8 @@ def load_settings() -> Settings:
         tshark_path=_get_str("TSHARK_PATH"),
         peer_names=parse_peer_names(_get_str("PEER_NAMES")),
         merge_window_seconds=_get_float("OBSERVER_MERGE_WINDOW_SECONDS", 2.0),
+        tls_cert_file=_get_path("TLS_CERT_FILE"),
+        tls_key_file=_get_path("TLS_KEY_FILE"),
+        tls_ca_file=_get_path("TLS_CA_FILE"),
         env_file=env_file,
     )

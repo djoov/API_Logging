@@ -1,11 +1,17 @@
 """Packet-capture backends (TShark, tcpdump) that turn wire traffic into HTTP message records.
 
-What capture can and cannot see (plaintext HTTP only):
+What capture can and cannot see:
+  Plaintext HTTP (Phase 1)
   * IP/port/TCP-stream/frame size are always available.
   * Method, URI, status and headers are in the first segment of each message, so they are
     reliable. X-Request-ID travels in a header for exactly this reason.
   * The JSON body may be split across TCP segments. TShark reassembles it; tcpdump does not,
     so with tcpdump the payload must come from the application logs instead.
+  HTTPS/TLS (Phase 2) - nothing is decrypted
+  * Visible: IP/port, TLS version and cipher (ServerHello), SNI (only if the client used a
+    hostname), and the size and timing of each encrypted record.
+  * Not visible: method, URI, status, headers (so no X-Request-ID) and the body.
+  * TLS is classified with TShark only; the tcpdump text parser does not understand TLS.
 """
 from __future__ import annotations
 
@@ -27,9 +33,22 @@ class CaptureError(RuntimeError):
     """Capture tool missing, misconfigured, or failed to start."""
 
 
+RecordKind = Literal["request", "response", "tls_client_hello", "tls_server_hello", "tls_handshake",
+                     "tls_alert", "tls_app_data"]
+
+# Values seen in ServerHello; anything else is shown as hex.
+TLS_VERSIONS = {"0x0304": "TLSv1.3", "0x0303": "TLSv1.2", "0x0302": "TLSv1.1", "0x0301": "TLSv1.0"}
+TLS_CIPHERS = {
+    "0x1301": "TLS_AES_128_GCM_SHA256", "0x1302": "TLS_AES_256_GCM_SHA384",
+    "0x1303": "TLS_CHACHA20_POLY1305_SHA256",
+    "0xc02b": "ECDHE-ECDSA-AES128-GCM-SHA256", "0xc02c": "ECDHE-ECDSA-AES256-GCM-SHA384",
+    "0xc02f": "ECDHE-RSA-AES128-GCM-SHA256", "0xc030": "ECDHE-RSA-AES256-GCM-SHA384",
+}
+
+
 @dataclass
 class CaptureRecord:
-    kind: Literal["request", "response"]
+    kind: RecordKind
     timestamp: float  # epoch seconds, as seen by the capture point
     backend: str
     src_ip: str | None = None
@@ -47,6 +66,10 @@ class CaptureRecord:
     http_time_ms: float | None = None  # TShark's "time since request"
     headers: dict[str, str] = field(default_factory=dict)  # lowercase header names
     body: dict[str, str] = field(default_factory=dict)  # top-level JSON members, if readable
+    tls_bytes: int | None = None  # sum of TLS record lengths in this frame (encrypted size)
+    tls_version: str | None = None
+    tls_cipher: str | None = None
+    tls_sni: str | None = None
 
     @property
     def request_id(self) -> str | None:
@@ -79,6 +102,10 @@ def _parse_header_lines(raw: str) -> dict[str, str]:
             name, value = line.split(":", 1)
             headers[name.strip().lower()] = value.strip()
     return headers
+
+
+def _ints(raw: str) -> list[int]:
+    return [int(v) for v in raw.split("|") if v.strip().isdigit()]
 
 
 def _parse_json_members(raw: str) -> dict[str, str]:
@@ -159,29 +186,35 @@ class TsharkBackend(CaptureBackend):
         "tcp.srcport", "tcp.dstport", "tcp.stream", "frame.len", "tcp.reassembled.length",
         "http.request.method", "http.request.uri", "http.response.code", "http.request_in",
         "http.time", "http.request.line", "http.response.line", "json.member_with_value",
+        # Phase 2 (appended so that older captures with fewer columns still parse)
+        "tls.record.content_type", "tls.record.length", "tls.handshake.type",
+        "tls.handshake.extensions_server_name", "tls.handshake.extensions.supported_version",
+        "tls.handshake.version", "tls.handshake.ciphersuite",
     ]
+    _PHASE1_COLUMNS = 19
 
     def __init__(self, executable: str, interface: str, bpf_filter: str, log: logging.Logger,
-                 read_file: Path | None = None) -> None:
+                 read_file: Path | None = None, tls_port: int | None = None) -> None:
         super().__init__(executable, interface, bpf_filter, log)
         self.read_file = read_file
+        # Force TLS decoding on the API port; without it TShark relies on heuristics.
+        self.tls_port = tls_port
 
     def build_command(self) -> list[str]:
+        display = "http || tls"
         if self.read_file:
             source = ["-r", str(self.read_file)]
-            if self.bpf_filter:
-                # BPF (-f) does not apply to files; the same idea as a display filter:
-                port = re.search(r"port\s+(\d+)", self.bpf_filter)
-                display = f"http && tcp.port == {port.group(1)}" if port else "http"
-            else:
-                display = "http"
+            # BPF (-f) does not apply to files; the same idea as a display filter:
+            port = re.search(r"port\s+(\d+)", self.bpf_filter or "")
+            if port:
+                display = f"({display}) && tcp.port == {port.group(1)}"
         else:
             if not self.interface:
                 raise CaptureError("no capture interface configured: set OBSERVER_INTERFACE "
                                    "(list them with: python observer/observer.py --list-interfaces)")
             source = ["-i", self.interface, "-f", self.bpf_filter, "-l"]
-            display = "http"
-        cmd = [self.executable, *source, "-n", "-Y", display, "-T", "fields",
+        decode_as = ["-d", f"tcp.port=={self.tls_port},tls"] if self.tls_port else []
+        cmd = [self.executable, *source, *decode_as, "-n", "-Y", display, "-T", "fields",
                "-E", "separator=/t", "-E", "occurrence=a", "-E", "aggregator=|", "-E", "quote=n"]
         for name in self.FIELDS:
             cmd += ["-e", name]
@@ -196,28 +229,19 @@ class TsharkBackend(CaptureBackend):
     @classmethod
     def parse_line(cls, line: str) -> CaptureRecord | None:
         parts = line.rstrip("\r\n").split("\t")
-        if len(parts) < len(cls.FIELDS):
+        if len(parts) < cls._PHASE1_COLUMNS:
             return None
+        parts += [""] * (len(cls.FIELDS) - len(parts))
         (frame_no, epoch, ip_src, ip_dst, ip6_src, ip6_dst, sport, dport, stream, frame_len,
          reassembled, method, uri, status, request_in, http_time, req_lines, resp_lines,
-         json_members) = parts[: len(cls.FIELDS)]
-
-        if method:
-            kind: Literal["request", "response"] = "request"
-            headers = _parse_header_lines(req_lines)
-        elif status:
-            kind = "response"
-            headers = _parse_header_lines(resp_lines)
-        else:
-            return None
+         json_members, tls_types, tls_lengths, hs_types, sni, supported_versions, hs_version,
+         ciphersuites) = parts[: len(cls.FIELDS)]
 
         try:
             timestamp = float(epoch)
         except ValueError:
             return None
-
-        return CaptureRecord(
-            kind=kind,
+        common: dict[str, Any] = dict(
             timestamp=timestamp,
             backend=cls.name,
             src_ip=(ip_src or ip6_src).split("|")[0] or None,
@@ -227,15 +251,46 @@ class TsharkBackend(CaptureBackend):
             tcp_stream=_int(stream),
             frame_number=_int(frame_no),
             frame_len=_int(frame_len),
-            message_len=_int(reassembled) or _int(frame_len),
-            method=method.split("|")[0] or None,
-            uri=uri.split("|")[0] or None,
-            status_code=_int(status),
-            request_in=_int(request_in),
-            http_time_ms=float(http_time) * 1000 if http_time else None,
-            headers=headers,
-            body=_parse_json_members(json_members),
         )
+
+        if method or status:
+            return CaptureRecord(
+                kind="request" if method else "response",
+                **common,
+                message_len=_int(reassembled) or _int(frame_len),
+                method=method.split("|")[0] or None,
+                uri=uri.split("|")[0] or None,
+                status_code=_int(status),
+                request_in=_int(request_in),
+                http_time_ms=float(http_time) * 1000 if http_time else None,
+                headers=_parse_header_lines(req_lines if method else resp_lines),
+                body=_parse_json_members(json_members),
+            )
+
+        lengths = _ints(tls_lengths)
+        if not lengths:
+            return None
+        explicit_types = set(_ints(tls_types))
+        handshakes = set(_ints(hs_types))
+        tls_bytes = sum(lengths)
+
+        # TLS 1.3 encrypts records after ServerHello and hides their real type, so only the
+        # frames with an explicit handshake (22) / change_cipher_spec (20) type are handshake.
+        if 1 in handshakes:
+            return CaptureRecord(kind="tls_client_hello", **common, tls_bytes=tls_bytes,
+                                 tls_sni=sni.split("|")[0] or None)
+        if 2 in handshakes:
+            # supported_versions (TLS 1.3) overrides the legacy ServerHello version field.
+            version_code = (supported_versions or hs_version).split("|")[0]
+            cipher_code = ciphersuites.split("|")[0]
+            return CaptureRecord(kind="tls_server_hello", **common, tls_bytes=tls_bytes,
+                                 tls_version=TLS_VERSIONS.get(version_code, version_code or None),
+                                 tls_cipher=TLS_CIPHERS.get(cipher_code, cipher_code or None))
+        if explicit_types & {20, 22}:
+            return CaptureRecord(kind="tls_handshake", **common, tls_bytes=tls_bytes)
+        if 21 in explicit_types:
+            return CaptureRecord(kind="tls_alert", **common, tls_bytes=tls_bytes)
+        return CaptureRecord(kind="tls_app_data", **common, tls_bytes=tls_bytes)
 
 
 class TcpdumpBackend(CaptureBackend):
@@ -341,6 +396,7 @@ def create_backend(
     log: logging.Logger,
     tshark_path: str = "",
     read_file: Path | None = None,
+    tls_port: int | None = None,
 ) -> CaptureBackend:
     """Pick a backend. "auto" prefers TShark (it reassembles TCP), then tcpdump."""
     if preference == "none" and read_file is None:
@@ -349,12 +405,12 @@ def create_backend(
         tshark = find_tshark(tshark_path)
         if not tshark:
             raise CaptureError("reading a pcap file needs TShark; install Wireshark/TShark or set TSHARK_PATH")
-        return TsharkBackend(tshark, interface, bpf_filter, log, read_file=read_file)
+        return TsharkBackend(tshark, interface, bpf_filter, log, read_file=read_file, tls_port=tls_port)
 
     if preference in ("auto", "tshark"):
         tshark = find_tshark(tshark_path)
         if tshark:
-            return TsharkBackend(tshark, interface, bpf_filter, log)
+            return TsharkBackend(tshark, interface, bpf_filter, log, tls_port=tls_port)
         if preference == "tshark":
             raise CaptureError("TShark not found: install Wireshark (includes TShark) or set TSHARK_PATH")
     if preference in ("auto", "tcpdump"):

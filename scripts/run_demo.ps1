@@ -6,16 +6,20 @@
   Proves the whole pipeline works before involving the Kali VM. Uses its own port and log
   directory (logs/demo) so it does not mix with real experiment logs.
   With -Capture it also captures on the Npcap loopback adapter using TShark.
+  With -Tls it runs over HTTPS (Phase 2) using a throw-away demo CA in logs/demo/certs.
+  The demo ignores the project .env so real lab settings cannot interfere.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\run_demo.ps1
   powershell -ExecutionPolicy Bypass -File scripts\run_demo.ps1 -Capture -Count 3 -Delay 2
+  powershell -ExecutionPolicy Bypass -File scripts\run_demo.ps1 -Capture -Tls
 #>
 param(
     [int]$Port = 8765,
     [int]$Count = 3,
     [double]$Delay = 2,
     [switch]$Capture,
+    [switch]$Tls,
     [string]$Interface = "\Device\NPF_Loopback",
     [string]$LogDir = "logs/demo"
 )
@@ -38,11 +42,26 @@ if (Test-Path $absLogDir) { Get-ChildItem $absLogDir -Filter *.jsonl | Remove-It
 New-Item -ItemType Directory -Force $absLogDir | Out-Null
 
 # Settings for the child processes (process-scoped; nothing is written to .env).
+# ENV_FILE points to a file that does not exist, so the real lab .env is not loaded.
+$env:ENV_FILE = Join-Path $absLogDir "demo-has-no.env"
 $env:LOG_DIR = $LogDir
 $env:NODE_NAME = "local-server"
 $env:OBSERVER_MERGE_WINDOW_SECONDS = "1"
 
 $mode = if ($Capture) { "both" } else { "app" }
+$scheme = "http"
+if ($Tls) {
+    # Demo-only CA and certificate for 127.0.0.1 (never used for the real two-host lab).
+    $certDir = Join-Path $absLogDir "certs"
+    if (-not (Test-Path (Join-Path $certDir "ca.pem"))) {
+        & $Python scripts/make_certs.py --dir $certDir ca | Out-Null
+        & $Python scripts/make_certs.py --dir $certDir server --name local --ip 127.0.0.1 --dns localhost | Out-Null
+    }
+    $env:TLS_CERT_FILE = Join-Path $certDir "local.pem"
+    $env:TLS_KEY_FILE = Join-Path $certDir "local.key"
+    $env:TLS_CA_FILE = Join-Path $certDir "ca.pem"
+    $scheme = "https"
+}
 $observerSeconds = [int](6 + $Count * $Delay + 6)
 
 $server = $null; $observer = $null
@@ -53,19 +72,22 @@ try {
 
     $observerArgs = @("observer/observer.py", "--mode", $mode, "--filter", "`"tcp port $Port`"", "--duration", "$observerSeconds")
     if ($Capture) { $observerArgs += @("--interface", $Interface, "--backend", "tshark") }
+    if ($Tls) { $observerArgs += @("--transport", "https") }
     $observer = Start-Process -PassThru -NoNewWindow -FilePath $Python -ArgumentList $observerArgs `
         -RedirectStandardOutput "$absLogDir\observer.out" -RedirectStandardError "$absLogDir\observer.err"
 
-    # Wait until the server answers /health (max ~10 s).
+    # Wait until the server port accepts connections (max ~10 s). A plain TCP check works for
+    # http and https alike, without trusting or skipping certificates here.
     $ready = $false
     for ($i = 0; $i -lt 20 -and -not $ready; $i++) {
         Start-Sleep -Milliseconds 500
-        try { $ready = (Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 2).status -eq "ok" } catch { }
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        try { $tcp.Connect("127.0.0.1", $Port); $ready = $true } catch { } finally { $tcp.Close() }
     }
-    if (-not $ready) { throw "server did not become healthy; see $absLogDir\server.err" }
+    if (-not $ready) { throw "server did not start; see $absLogDir\server.err" }
     Start-Sleep -Seconds 3  # give TShark time to start capturing
 
-    & $Python client/traffic_generator.py --target "http://127.0.0.1:$Port" --sender local-client --count $Count --delay $Delay
+    & $Python client/traffic_generator.py --target "$($scheme)://127.0.0.1:$Port" --sender local-client --count $Count --delay $Delay
     $clientExit = $LASTEXITCODE
 
     Write-Host "[demo] waiting for observer to finish ($observerSeconds s window) ..."
@@ -84,8 +106,9 @@ $eventsFile = Join-Path $absLogDir "api-events.jsonl"
 if (Test-Path $eventsFile) {
     $events = Get-Content $eventsFile | ForEach-Object { $_ | ConvertFrom-Json }
     Write-Host "`n===== $eventsFile ($($events.Count) events) ====="
-    $events | Select-Object direction, method, endpoint, status_code, latency_ms, latency_source,
-        server_processing_ms, wire_latency_ms, tcp_stream, @{n = "evidence"; e = { $_.evidence -join "," } }, request_id |
+    $events | Select-Object direction, transport, tls_version, method, endpoint, status_code, latency_ms,
+        latency_source, server_processing_ms, wire_latency_ms, tcp_stream, request_bytes,
+        @{n = "evidence"; e = { $_.evidence -join "," } }, capture_match |
         Format-Table -AutoSize | Out-String -Width 250 | Write-Host
 } else {
     Write-Host "[demo] no events written" -ForegroundColor Red

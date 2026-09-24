@@ -3,10 +3,15 @@
 Evidence sources on one host:
   client_log  - logs/client-events.jsonl (this host sent the request)
   server_log  - logs/server-events.jsonl (this host received the request)
-  capture     - TShark/tcpdump HTTP records seen on the wire
+  capture     - TShark/tcpdump HTTP records seen on the wire (plaintext, Phase 1)
+  capture_tls - encrypted TLS exchanges rebuilt from record sizes/timing (Phase 2)
 
 The correlation key is the application-level request_id. TCP stream and frame numbers are only
 used as a fallback for traffic that carries no request_id, and are kept as metadata.
+
+With HTTPS the request_id is encrypted, so a TLS exchange seen on the wire is matched to an
+application log entry by connection 4-tuple (client IP:port -> server port) plus time proximity.
+The event records how the capture evidence was matched in "capture_match".
 """
 from __future__ import annotations
 
@@ -18,6 +23,19 @@ from typing import Any
 from common.logging_utils import to_iso
 from models.schemas import ApiExchangeEvent, PayloadMetadata
 from observer.capture_backend import CaptureRecord
+from observer.tls_flows import TlsExchange, TlsExchangeTracker
+
+# A TLS exchange and an app-log entry on the same connection must start within this many seconds.
+TLS_MATCH_TOLERANCE_S = 5.0
+
+
+def _epoch(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -28,23 +46,27 @@ class _Pending:
     response_time: float | None = None
     last_update: float = field(default_factory=time.monotonic)
 
-    def merge(self, updates: dict[str, Any]) -> None:
+    def merge(self, updates: dict[str, Any], touch: bool = True) -> None:
         # First source to provide a value wins; later sources only fill gaps.
         for key, value in updates.items():
             if value is not None and self.fields.get(key) is None:
                 self.fields[key] = value
-        self.last_update = time.monotonic()
+        if touch:
+            self.last_update = time.monotonic()
 
 
 class ExchangeCorrelator:
     def __init__(self, node_name: str, peer_names: dict[str, str] | None = None,
-                 merge_window: float = 2.0, incomplete_timeout: float = 30.0) -> None:
+                 merge_window: float = 2.0, incomplete_timeout: float = 30.0,
+                 server_port: int | None = None) -> None:
         self.node_name = node_name
         self.peer_names = peer_names or {}
         self.merge_window = merge_window
         self.incomplete_timeout = incomplete_timeout
         self._pending: dict[str, _Pending] = {}
         self._frame_to_key: dict[int, str] = {}  # capture request frame -> key (fallback pairing)
+        self.tls = TlsExchangeTracker(server_port)
+        self._tls_ready: list[tuple[TlsExchange, float]] = []  # finished exchanges awaiting a match
 
     # ---- evidence input -------------------------------------------------
 
@@ -69,6 +91,9 @@ class ExchangeCorrelator:
             "server_processing_ms": rec.get("server_processing_ms"),
             "error": rec.get("error"),
             "target": rec.get("target"),
+            "transport": rec.get("transport"),
+            "tls_version": rec.get("tls_version"),
+            "tls_cipher": rec.get("tls_cipher"),
         })
         self._merge_payload(entry, rec.get("payload"))
         if rec.get("status_code") is None:
@@ -92,10 +117,15 @@ class ExchangeCorrelator:
             "endpoint": rec.get("endpoint"),
             "status_code": rec.get("status_code"),
             "server_processing_ms": rec.get("server_processing_ms"),
+            "transport": rec.get("transport"),
         })
         self._merge_payload(entry, rec.get("payload"))
 
     def add_capture_record(self, rec: CaptureRecord) -> None:
+        if rec.kind.startswith("tls_"):
+            now = time.monotonic()
+            self._tls_ready += [(ex, now) for ex in self.tls.add(rec)]
+            return
         if rec.kind == "request":
             key = rec.request_id or f"capture-frame-{rec.frame_number}-{rec.timestamp}"
             if rec.frame_number is not None:
@@ -153,13 +183,35 @@ class ExchangeCorrelator:
         and has not received new evidence for merge_window seconds."""
         now = time.monotonic()
         done: list[dict[str, Any]] = []
-        for key in list(self._pending):
+        self._tls_ready += [(ex, now) for ex in
+                            self.tls.expire(self.merge_window, self.incomplete_timeout, force)]
+
+        due = [key for key, entry in self._pending.items() if force or self._is_due(entry, now)]
+        # 1) An app entry about to be emitted gets its TLS evidence first, even if the TLS
+        #    exchange is still inside its own merge window.
+        for key in due:
             entry = self._pending[key]
-            complete = entry.fields.get("status_code") is not None or entry.fields.get("failed")
-            limit = self.merge_window if complete else self.incomplete_timeout
-            if force or now - entry.last_update >= limit:
-                done.append(self._build_event(entry))
-                del self._pending[key]
+            candidates = [ex for ex, _ in self._tls_ready]
+            candidates += [ex for ex in self.tls.in_progress() if ex.has_response]
+            match = self._best_tls_match(entry, candidates)
+            if match is not None:
+                self._consume_tls(match)
+                self._attach_tls(entry, match)
+        # 2) Finished TLS exchanges look for any pending app entry; unmatched ones become
+        #    capture-only events once they have waited one merge window for app logs.
+        waiting: list[tuple[TlsExchange, float]] = []
+        for ex, since in self._tls_ready:
+            entry = self._best_entry_for(ex)
+            if entry is not None:
+                self._attach_tls(entry, ex)
+            elif force or now - since >= self.merge_window:
+                done.append(self._build_event(self._capture_only_entry(ex)))
+            else:
+                waiting.append((ex, since))
+        self._tls_ready = waiting
+
+        for key in due:
+            done.append(self._build_event(self._pending.pop(key)))
         if len(self._frame_to_key) > 10_000:
             self._frame_to_key.clear()
         return done
@@ -169,6 +221,66 @@ class ExchangeCorrelator:
         return len(self._pending)
 
     # ---- helpers --------------------------------------------------------
+
+    def _is_due(self, entry: _Pending, now: float) -> bool:
+        complete = entry.fields.get("status_code") is not None or entry.fields.get("failed")
+        limit = self.merge_window if complete else self.incomplete_timeout
+        return now - entry.last_update >= limit
+
+    @staticmethod
+    def _tls_distance(entry: _Pending, ex: TlsExchange) -> float | None:
+        """Seconds between entry and ex if they describe the same connection, else None."""
+        f = entry.fields
+        if "capture_tls" in entry.evidence or "capture" in entry.evidence:
+            return None
+        if f.get("source_ip") != ex.client_ip or f.get("source_port") != ex.client_port:
+            return None
+        if f.get("destination_port") not in (None, ex.server_port):
+            return None
+        started = _epoch(f.get("timestamp"))
+        if started is None:
+            return None
+        distance = abs(started - ex.request_time)
+        return distance if distance <= TLS_MATCH_TOLERANCE_S else None
+
+    def _best_tls_match(self, entry: _Pending, candidates: list[TlsExchange]) -> TlsExchange | None:
+        scored = [(d, ex) for ex in candidates if (d := self._tls_distance(entry, ex)) is not None]
+        return min(scored, key=lambda item: item[0])[1] if scored else None
+
+    def _best_entry_for(self, ex: TlsExchange) -> _Pending | None:
+        scored = [(d, e) for e in self._pending.values() if (d := self._tls_distance(e, ex)) is not None]
+        return min(scored, key=lambda item: item[0])[1] if scored else None
+
+    def _consume_tls(self, ex: TlsExchange) -> None:
+        self._tls_ready = [(e, s) for e, s in self._tls_ready if e is not ex]
+        self.tls.take(ex)
+
+    @staticmethod
+    def _attach_tls(entry: _Pending, ex: TlsExchange) -> None:
+        entry.evidence.add("capture_tls")
+        entry.request_time = entry.request_time or ex.request_time
+        entry.merge({
+            "source_ip": ex.client_ip,
+            "source_port": ex.client_port,
+            "destination_ip": ex.server_ip,
+            "destination_port": ex.server_port,
+            "tcp_stream": ex.tcp_stream,
+            "request_bytes": ex.request_bytes,
+            "response_bytes": ex.response_bytes if ex.has_response else None,
+            "wire_latency_ms": ex.wire_latency_ms,
+            "transport": "https",
+            "tls_version": ex.tls_version,
+            "tls_cipher": ex.tls_cipher,
+            "tls_sni": ex.tls_sni,
+            "capture_match": "4tuple_time",
+        }, touch=False)
+
+    def _capture_only_entry(self, ex: TlsExchange) -> _Pending:
+        """An encrypted exchange with no app log on this host: only wire metadata is known."""
+        entry = _Pending()
+        self._attach_tls(entry, ex)
+        entry.fields["capture_match"] = None
+        return entry
 
     def _entry(self, key: str) -> _Pending:
         return self._pending.setdefault(key, _Pending())
@@ -226,6 +338,13 @@ class ExchangeCorrelator:
         if entry.request_time is not None and (timestamp is None or "client_log" not in entry.evidence):
             timestamp = to_iso(datetime.fromtimestamp(entry.request_time, tz=timezone.utc))
 
+        if "capture" in entry.evidence:
+            capture_match = "request_id"  # plaintext: X-Request-ID read from the wire
+        else:
+            capture_match = f.get("capture_match")
+        transport = f.get("transport") or ("https" if "capture_tls" in entry.evidence
+                                           else "http" if "capture" in entry.evidence else None)
+
         event = ApiExchangeEvent(
             timestamp=timestamp or to_iso(datetime.now(timezone.utc)),
             observer=self.node_name,
@@ -250,5 +369,10 @@ class ExchangeCorrelator:
             evidence=sorted(entry.evidence),
             payload=PayloadMetadata(**f.get("payload", {})),
             error=f.get("error"),
+            transport=transport,
+            tls_version=f.get("tls_version"),
+            tls_cipher=f.get("tls_cipher"),
+            tls_sni=f.get("tls_sni"),
+            capture_match=capture_match,
         )
         return event.to_record()

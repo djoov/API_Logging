@@ -5,7 +5,7 @@ Eksperimen terkontrol untuk mengamati komunikasi API dua arah antara **Windows (
 payload, latency, timestamp, correlation ID (`request_id`), dan arah traffic.
 
 > Lingkup: lab milik sendiri, traffic dengan delay terkontrol. Tidak ada cracking, bypass, atau
-> breaking encryption. Fase 2 (HTTPS/TLS) dan Fase 3 (Fernet) hanya disiapkan, belum diaktifkan.
+> breaking encryption. Fase 2 (HTTPS/TLS) sudah tersedia (§15); Fase 3 (Fernet) baru disiapkan.
 
 ---
 
@@ -24,7 +24,7 @@ payload, latency, timestamp, correlation ID (`request_id`), dan arah traffic.
 12. [Troubleshooting packet capture](#12-troubleshooting-packet-capture)
 13. [Contoh output](#13-contoh-output)
 14. [Keterbatasan POC](#14-keterbatasan-poc)
-15. [Roadmap HTTPS/TLS](#15-roadmap-fase-2-httpstls)
+15. [Fase 2: HTTPS/TLS](#15-fase-2-httpstls)
 16. [Roadmap application-layer encryption](#16-roadmap-fase-3-application-layer-encryption-fernet)
 
 ---
@@ -71,10 +71,14 @@ api-observability-lab/
 ├── client/traffic_generator.py # generator traffic dengan count + delay
 ├── observer/
 │   ├── observer.py             # entry point observer
-│   ├── capture_backend.py      # abstraksi TShark / tcpdump
-│   └── correlator.py           # penggabungan bukti per request_id
-├── security/payload_crypto.py  # FASE 3: interface Fernet (belum dipakai)
-├── scripts/                    # setup_windows.ps1, setup_kali.sh, run_demo.ps1
+│   ├── capture_backend.py      # abstraksi TShark / tcpdump (HTTP + TLS)
+│   ├── tls_flows.py            # FASE 2: rekonstruksi exchange dari record TLS terenkripsi
+│   └── correlator.py           # penggabungan bukti per request_id / 4-tuple
+├── security/
+│   ├── tls_certs.py            # FASE 2: CA lab + sertifikat server
+│   └── payload_crypto.py       # FASE 3: interface Fernet (belum dipakai)
+├── secrets/                    # sertifikat & key (tidak di-commit)
+├── scripts/                    # setup_windows.ps1, setup_kali.sh, run_demo.ps1, make_certs.py
 ├── logs/                       # output JSONL (tidak di-commit)
 └── tests/                      # pytest
 ```
@@ -499,21 +503,116 @@ Event arah sebaliknya di observer Windows: `"direction": "kali_to_windows"`, `"v
 - **Parsing tcpdump berbasis teks** (`-A`), cukup untuk request kecil; TShark lebih andal.
 - Console memakai waktu lokal; semua JSONL memakai **UTC**.
 
-## 15. Roadmap Fase 2: HTTPS/TLS
+## 15. Fase 2: HTTPS/TLS
 
-Belum diimplementasikan (sengaja, sampai Fase 1 stabil). Titik perubahan yang sudah disiapkan:
+Traffic yang sama seperti Fase 1, tetapi transport-nya TLS. Observer **tidak mendekripsi apa pun**
+(tidak ada private key server, tidak ada `SSLKEYLOGFILE`, tidak ada `verify=False`). Tujuannya
+mengukur apa yang *masih* bisa diamati dari luar ketika transport dienkripsi.
 
-1. Buat CA lab + sertifikat server untuk IP masing-masing host (mis. dengan `openssl` atau `mkcert`),
-   simpan di `secrets/` (sudah di-`.gitignore`).
-2. Server: `uvicorn.run(..., ssl_certfile=..., ssl_keyfile=...)` di `server/api_server.py`
-   (variabel `.env` baru: `TLS_CERT_FILE`, `TLS_KEY_FILE`).
-3. Client: `TARGET_SCHEME=https` (sudah ada di config) dan `httpx.Client(verify="<ca.pem>")`.
-   **Jangan** memakai `verify=False`.
-4. Ekspektasi observasi: capture masih melihat IP/port/ukuran/timing dan TLS handshake (SNI jika
-   memakai hostname), tetapi **tidak** lagi melihat method, URI, header, `X-Request-ID`, atau body.
-   Korelasi pada capture-only akan hilang; app log tetap lengkap. Inilah hasil yang dibandingkan
-   dengan baseline Fase 1.
-5. Tidak ada dekripsi TLS oleh observer; tidak ada bypass.
+### 15.1 Sertifikat lab
+Satu CA lab lokal menandatangani sertifikat server tiap host. SubjectAltName berisi IP yang
+dipakai client, jadi verifikasi hostname/IP tetap aktif. Buat **di Windows** (CA key tetap di sana):
+
+```powershell
+python scripts/make_certs.py ca
+python scripts/make_certs.py server --name windows --ip 192.168.56.1 --ip 127.0.0.1 --dns localhost
+python scripts/make_certs.py server --name kali --ip 192.168.56.10
+python scripts/make_certs.py show
+```
+
+Hasil di `secrets/` (di-`.gitignore`, tidak pernah ke GitHub):
+
+| File | Tinggal di | Salin ke Kali? |
+|---|---|---|
+| `ca.key` | Windows | **tidak pernah** |
+| `ca.pem` | Windows + Kali | ya (publik, untuk verifikasi) |
+| `windows.pem` / `windows.key` | Windows | tidak |
+| `kali.pem` / `kali.key` | Kali | ya, lalu boleh dihapus dari Windows |
+
+Salin lewat jaringan lab (Host-Only), misalnya dengan SSH di Kali:
+```bash
+# Kali
+sudo systemctl start ssh
+mkdir -p ~/API_Logging/secrets
+```
+```powershell
+# Windows (scp bawaan Windows)
+scp secrets\ca.pem secrets\kali.pem secrets\kali.key <user-kali>@192.168.56.10:~/API_Logging/secrets/
+```
+```bash
+# Kali
+chmod 600 ~/API_Logging/secrets/kali.key
+sudo systemctl stop ssh      # jika SSH tidak dipakai lagi
+```
+
+### 15.2 Konfigurasi
+```ini
+# Windows .env (tambahan)               # Kali .env (tambahan)
+TLS_CERT_FILE=secrets/windows.pem       TLS_CERT_FILE=secrets/kali.pem
+TLS_KEY_FILE=secrets/windows.key        TLS_KEY_FILE=secrets/kali.key
+TARGET_SCHEME=https                     TARGET_SCHEME=https
+TLS_CA_FILE=secrets/ca.pem              TLS_CA_FILE=secrets/ca.pem
+```
+Kosongkan keempat baris untuk kembali ke HTTP (Fase 1). Restart server setelah mengubah `.env`.
+
+### 15.3 Menjalankan
+Perintahnya **sama** dengan Fase 1 (§6–§9). Server menampilkan `listening on https://...`, client
+menampilkan `HEALTH ... ok (TLSv1.3, TLS_AES_256_GCM_SHA384)`. Observer otomatis memakai
+`--transport https` jika `TLS_CERT_FILE` atau `TARGET_SCHEME=https` diisi; opsi ini memaksa TShark
+mendekode port API sebagai TLS (`-d tcp.port==8000,tls`).
+
+Uji lokal satu mesin (CA demo sekali pakai di `logs/demo/certs`):
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_demo.ps1 -Capture -Tls
+```
+
+Uji manual dari Kali: `curl --cacert secrets/ca.pem https://192.168.56.1:8000/health`
+(tanpa `--cacert` curl harus **menolak** — itu tanda verifikasi bekerja).
+
+### 15.4 Apa yang berubah pada observasi (hasil smoke test nyata)
+
+| Yang diamati | Fase 1 (HTTP) | Fase 2 (HTTPS) |
+|---|---|---|
+| IP, port, TCP stream | terlihat di kabel | terlihat di kabel |
+| Waktu request/response (`wire_latency_ms`) | terlihat | **terlihat** (dari timing record terenkripsi) |
+| Ukuran request/response | ukuran HTTP | ukuran record TLS (≈ HTTP + ~17 B overhead per record) — **ukuran tetap bocor** |
+| Versi TLS, cipher | – | terlihat (ServerHello), mis. `TLSv1.3`, `TLS_AES_256_GCM_SHA384` |
+| SNI | – | kosong, karena client memakai IP (akan terlihat jika memakai hostname) |
+| Method, URI, status, header | terlihat | **tidak terlihat** |
+| `X-Request-ID`, body JSON | terlihat | **tidak terlihat** |
+| Korelasi capture ↔ app log | `capture_match=request_id` | `capture_match=4tuple_time` (lihat bawah) |
+| Observer tanpa app log (host ketiga) | event lengkap | hanya `evidence=["capture_tls"]`: arah, waktu, ukuran; `request_id`/endpoint/status `null` |
+
+**Korelasi tanpa `request_id` di kabel.** Karena ID terenkripsi, observer memasangkan exchange TLS
+dengan log aplikasi di host yang sama berdasarkan **4-tuple koneksi** (IP:port client → port server)
+**dan kedekatan waktu** (≤ 5 detik, dipilih yang terdekat). Ini bekerja karena HTTP/1.1 dalam satu
+koneksi berurutan (request berikutnya baru dikirim setelah response). Inilah titik di mana
+metadata TCP yang di Fase 1 hanya "tambahan" menjadi satu-satunya jembatan — dan hasilnya lebih
+lemah: bergantung pada heuristik, bukan pada ID eksplisit.
+
+**Cara exchange direkonstruksi dari record terenkripsi** (`observer/tls_flows.py`): record data dari
+client membuka request, record dari server setelahnya adalah response, record client berikutnya
+menutup exchange sebelumnya. Record pertama dari server setelah handshake TLS 1.3 adalah
+*NewSessionTicket* dan dilewati — tiket bisa datang *sesudah* request pertama (terjadi nyata di smoke
+test; ada regression test-nya).
+
+### 15.5 Keterbatasan Fase 2
+- Rekonstruksi exchange mengasumsikan HTTP/1.1 (tanpa pipelining) dan satu gelombang session ticket
+  per koneksi (default OpenSSL/Python `ssl`). HTTP/2 multiplexing akan mematahkan asumsi ini.
+- Klasifikasi TLS hanya dengan TShark. tcpdump di Kali: rekam `tcpdump -w` lalu `--read-pcap`.
+- Ukuran record adalah ukuran terenkripsi, bukan ukuran payload persis.
+- Korelasi 4-tuple hanya mungkin di host yang punya app log; observer pihak ketiga hanya punya
+  metadata.
+
+### 15.6 Troubleshooting TLS
+
+| Pesan | Arti / solusi |
+|---|---|
+| `TLS certificate rejected: ... CERTIFICATE_VERIFY_FAILED` | `TLS_CA_FILE` bukan `ca.pem` lab, atau IP target tidak ada di SAN sertifikat server (`make_certs.py show`) |
+| `TLS handshake failed ... server is probably plain HTTP` | target `https://` tapi server belum HTTPS (cek `TLS_CERT_FILE` di host server, restart) |
+| Client `http://` ke server HTTPS: `RemoteProtocolError`/disconnect | ubah `TARGET_SCHEME=https` |
+| `CONFIG ERROR TLS_CERT_FILE not found` | path relatif dihitung dari root project; cek `ls secrets/` |
+| Observer tidak menampilkan `WIRE TLS` | observer dijalankan dengan `--transport http` atau interface salah |
 
 ## 16. Roadmap Fase 3: application-layer encryption (Fernet)
 

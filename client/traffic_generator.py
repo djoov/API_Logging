@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import ssl
 import statistics
 import sys
 import time
@@ -51,6 +52,8 @@ class SendResult:
     remote_addr: tuple[str, int] | None = None
     sent_at: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
+    tls_version: str | None = None  # e.g. "TLSv1.3"; None for plain HTTP
+    tls_cipher: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -76,6 +79,43 @@ def _socket_addresses(response: httpx.Response) -> tuple[Any, Any]:
         return stream.get_extra_info("client_addr"), stream.get_extra_info("server_addr")
     except Exception:
         return None, None
+
+
+def _tls_info(response: httpx.Response) -> tuple[str | None, str | None]:
+    """(TLS version, cipher name) negotiated on the connection, or (None, None) for plain HTTP."""
+    stream = response.extensions.get("network_stream")
+    try:
+        ssl_object = stream.get_extra_info("ssl_object") if stream is not None else None
+    except Exception:
+        ssl_object = None
+    if ssl_object is None:
+        return None, None
+    cipher = ssl_object.cipher()
+    return ssl_object.version(), cipher[0] if cipher else None
+
+
+def build_verify(target: str, ca_file: Path | None) -> ssl.SSLContext | bool:
+    """Certificate verification for https targets: trust the lab CA if given, else the system store.
+    Verification is never disabled."""
+    if not target.startswith("https://"):
+        return True
+    if ca_file is None:
+        log.warning("WARNING https target without TLS_CA_FILE: using the system trust store, "
+                    "which will reject lab certificates")
+        return ssl.create_default_context()
+    if not ca_file.is_file():
+        raise FileNotFoundError(f"TLS_CA_FILE not found: {ca_file}")
+    return ssl.create_default_context(cafile=str(ca_file))
+
+
+def _explain_connect_error(exc: Exception) -> str:
+    text = str(exc)
+    if "CERTIFICATE_VERIFY_FAILED" in text:
+        return (f"TLS certificate rejected: {text} -- is TLS_CA_FILE the lab ca.pem, and does the server "
+                f"certificate list the target IP in its SubjectAltName? (scripts/make_certs.py show)")
+    if "WRONG_VERSION_NUMBER" in text or "record layer failure" in text:
+        return f"TLS handshake failed: {text} -- the server is probably plain HTTP; use http:// or enable TLS on it"
+    return f"connection failed: {text}"
 
 
 def send_one(
@@ -108,7 +148,7 @@ def send_one(
         except httpx.TimeoutException as exc:
             result.error = f"timeout: {type(exc).__name__}"
         except httpx.ConnectError as exc:
-            result.error = f"connection failed: {exc}"
+            result.error = _explain_connect_error(exc)
         except httpx.TransportError as exc:
             result.error = f"transport error: {type(exc).__name__}: {exc}"
         else:
@@ -116,6 +156,7 @@ def send_one(
             result.client_rtt_ms = (time.perf_counter() - start) * 1000
             result.status_code = response.status_code
             result.local_addr, result.remote_addr = _socket_addresses(response)
+            result.tls_version, result.tls_cipher = _tls_info(response)
             if response.is_success:
                 try:
                     parsed = ApiTestResponse.model_validate(response.json())
@@ -148,6 +189,9 @@ def _record_for_log(result: SendResult, sender: str, base_url: str) -> dict[str,
         "target": base_url,
         "method": "POST",
         "endpoint": ENDPOINT,
+        "transport": "https" if base_url.startswith("https://") else "http",
+        "tls_version": result.tls_version,
+        "tls_cipher": result.tls_cipher,
         "source_ip": local[0],
         "source_port": local[1],
         "destination_ip": remote[0],
@@ -167,15 +211,20 @@ def check_health(client: httpx.Client, base_url: str, sender: str) -> bool:
     url = base_url.rstrip("/") + "/health"
     try:
         response = client.get(url, headers={HEADER_REQUEST_ID: new_request_id(), HEADER_SENDER: sender})
+    except httpx.ConnectError as exc:
+        log.error("HEALTH %s failed: %s", url, _explain_connect_error(exc))
+        if "TLS" not in _explain_connect_error(exc):
+            log.error("HINT is the server running and bound to 0.0.0.0? Is the port allowed by the firewall? "
+                      "Test with: curl %s  (Kali)  or  Test-NetConnection <IP> -Port <PORT>  (Windows)", url)
+        return False
     except httpx.TransportError as exc:
         log.error("HEALTH %s unreachable: %s: %s", url, type(exc).__name__, exc)
-        log.error("HINT is the server running and bound to 0.0.0.0? Is the port allowed by the firewall? "
-                  "Test with: curl %s  (Kali)  or  Test-NetConnection <IP> -Port <PORT>  (Windows)", url)
         return False
     if response.status_code != 200:
         log.error("HEALTH %s returned HTTP %s", url, response.status_code)
         return False
-    log.info("HEALTH %s ok", url)
+    tls_version, tls_cipher = _tls_info(response)
+    log.info("HEALTH %s ok%s", url, f" ({tls_version}, {tls_cipher})" if tls_version else "")
     return True
 
 
@@ -195,6 +244,8 @@ def parse_args(settings: Settings, argv: list[str] | None = None) -> argparse.Na
     parser.add_argument("--skip-health", action="store_true", help="do not call /health before sending")
     parser.add_argument("--log-file", type=Path, default=settings.log_dir / "client-events.jsonl",
                         help="where to append client records")
+    parser.add_argument("--ca-file", type=Path, default=settings.tls_ca_file,
+                        help="CA certificate to trust for https targets (default: TLS_CA_FILE)")
     args = parser.parse_args(argv)
 
     if not args.target:
@@ -221,8 +272,14 @@ def run(args: argparse.Namespace) -> int:
     if args.delay < 1:
         log.warning("WARNING delay < 1s; keep delays reasonable in the lab")
 
+    try:
+        verify = build_verify(args.target, args.ca_file)
+    except (FileNotFoundError, ssl.SSLError) as exc:
+        log.error("CONFIG ERROR %s", exc)
+        return 2
+
     results: list[SendResult] = []
-    with httpx.Client(timeout=args.timeout) as client:
+    with httpx.Client(timeout=args.timeout, verify=verify) as client:
         if not args.skip_health and not check_health(client, args.target, args.sender):
             return 2
         try:

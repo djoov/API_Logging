@@ -107,6 +107,14 @@ class ApiExchangeEvent(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     payload: PayloadMetadata = Field(default_factory=PayloadMetadata)
     error: str | None = None
+    # Phase 2
+    transport: str | None = None  # "http" or "https"
+    tls_version: str | None = None
+    tls_cipher: str | None = None
+    tls_sni: str | None = None  # empty when the client connects to an IP address
+    # How wire evidence was tied to this exchange: "request_id" (plaintext header),
+    # "4tuple_time" (TLS: same connection + close in time), or None (no capture / unmatched).
+    capture_match: str | None = None
 
     def to_record(self) -> dict[str, Any]:
         return self.model_dump(mode="json")

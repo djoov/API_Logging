@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -48,6 +49,11 @@ def parse_args(settings: Settings, argv: list[str] | None = None) -> argparse.Na
     parser.add_argument("--node-name", default=settings.node_name, help="this host's name (default: NODE_NAME)")
     parser.add_argument("--output", type=Path, default=settings.log_dir / "api-events.jsonl")
     parser.add_argument("--list-interfaces", action="store_true", help="print capture interfaces and exit")
+    https_default = settings.server_tls or settings.target_scheme == "https"
+    parser.add_argument("--transport", choices=["auto", "http", "https"],
+                        default="https" if https_default else "auto",
+                        help="https forces TShark to decode the API port as TLS (default: https when "
+                             "TLS_CERT_FILE or TARGET_SCHEME=https is set, else auto-detect)")
     return parser.parse_args(argv)
 
 
@@ -79,23 +85,42 @@ def _capture_worker(backend: CaptureBackend, out: "queue.Queue[Any]") -> None:
 
 
 def _log_capture(record: CaptureRecord) -> None:
-    what = f"{record.method} {record.uri}" if record.kind == "request" else f"status={record.status_code}"
-    log.info("WIRE %s:%s -> %s:%s %s stream=%s bytes=%s request_id=%s",
-             record.src_ip, record.src_port, record.dst_ip, record.dst_port, what,
-             record.tcp_stream, record.message_len, record.request_id or "-")
+    flow = f"{record.src_ip}:{record.src_port} -> {record.dst_ip}:{record.dst_port}"
+    if record.kind in ("request", "response"):
+        what = f"{record.method} {record.uri}" if record.kind == "request" else f"status={record.status_code}"
+        log.info("WIRE %s %s stream=%s bytes=%s request_id=%s",
+                 flow, what, record.tcp_stream, record.message_len, record.request_id or "-")
+        return
+    extra = ""
+    if record.kind == "tls_server_hello":
+        extra = f" version={record.tls_version} cipher={record.tls_cipher}"
+    elif record.kind == "tls_client_hello":
+        extra = f" sni={record.tls_sni or '-'}"
+    # Encrypted: no method, URI, status or request_id is visible here.
+    log.info("WIRE TLS %s %s stream=%s encrypted_bytes=%s%s",
+             flow, record.kind.removeprefix("tls_"), record.tcp_stream, record.tls_bytes, extra)
 
 
 def _log_event(event: dict[str, Any]) -> None:
     sender, _, receiver = event["direction"].partition("_to_")
     latency = f"{event['latency_ms']:.1f}ms ({event['latency_source']})" if event["latency_ms"] is not None else "n/a"
-    log.info("OBSERVED %s -> %s %s %s status=%s latency=%s request_id=%s evidence=%s",
-             sender, receiver, event["method"], event["endpoint"], event["status_code"],
-             latency, event["request_id"], ",".join(event["evidence"]))
+    tls = f" {event['tls_version']}" if event.get("tls_version") else ""
+    match = f" match={event['capture_match']}" if event.get("capture_match") else ""
+    log.info("OBSERVED %s -> %s [%s%s] %s %s status=%s latency=%s request_id=%s evidence=%s%s",
+             sender, receiver, event.get("transport") or "?", tls, event["method"], event["endpoint"],
+             event["status_code"], latency, event["request_id"], ",".join(event["evidence"]), match)
+
+
+def _server_port(settings: Settings, bpf_filter: str) -> int:
+    match = re.search(r"port\s+(\d+)", bpf_filter or "")
+    return int(match.group(1)) if match else settings.app_port
 
 
 def run(settings: Settings, args: argparse.Namespace) -> int:
     node = args.node_name.lower()
-    correlator = ExchangeCorrelator(node, settings.peer_names, settings.merge_window_seconds)
+    server_port = _server_port(settings, args.filter)
+    correlator = ExchangeCorrelator(node, settings.peer_names, settings.merge_window_seconds,
+                                    server_port=server_port)
     use_app = args.mode in ("app", "both") and args.read_pcap is None
     use_capture = args.mode in ("capture", "both") and not args.replay
     finite = args.replay or args.read_pcap is not None  # run to completion instead of tailing
@@ -112,7 +137,11 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
     if use_capture:
         try:
             backend = create_backend(args.backend or settings.capture_backend, args.interface, args.filter,
-                                     log, settings.tshark_path, args.read_pcap)
+                                     log, settings.tshark_path, args.read_pcap,
+                                     tls_port=server_port if args.transport == "https" else None)
+            if args.transport == "https" and backend.name == "tcpdump":
+                log.warning("CAPTURE tcpdump cannot classify TLS records; install TShark, or record with "
+                            "`tcpdump -w` and analyse with --read-pcap")
             backend.build_command()  # validates interface early, before starting threads
         except CaptureError as exc:
             if args.mode == "capture":
@@ -124,8 +153,8 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
             threading.Thread(target=_capture_worker, args=(backend, events_q), daemon=True).start()
             capture_running = True
 
-    log.info("OBSERVER node=%s mode=%s capture=%s output=%s", node, args.mode,
-             backend.name if backend else "off", args.output)
+    log.info("OBSERVER node=%s mode=%s capture=%s transport=%s server_port=%s output=%s", node, args.mode,
+             backend.name if backend else "off", args.transport, server_port, args.output)
     if use_app:
         log.info("OBSERVER reading %s and %s", tailers["client"].path, tailers["server"].path)
 
