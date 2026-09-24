@@ -25,7 +25,10 @@ payload, latency, timestamp, correlation ID (`request_id`), dan arah traffic.
 13. [Contoh output](#13-contoh-output)
 14. [Keterbatasan POC](#14-keterbatasan-poc)
 15. [Fase 2: HTTPS/TLS](#15-fase-2-httpstls)
-16. [Roadmap application-layer encryption](#16-roadmap-fase-3-application-layer-encryption-fernet)
+16. [Eksperimen transport (Run A–D)](#16-eksperimen-transport-jeda-40-ms-dan-koneksi-baru-per-request)
+17. [Roadmap application-layer encryption](#17-roadmap-fase-3-application-layer-encryption-fernet)
+
+Cerita lengkap proyek ini dalam bahasa non-teknis: [`docs/laporan-perjalanan.md`](docs/laporan-perjalanan.md).
 
 ---
 
@@ -584,17 +587,30 @@ Uji manual dari Kali: `curl --cacert secrets/ca.pem https://192.168.56.1:8000/he
 | Observer tanpa app log (host ketiga) | event lengkap | hanya `evidence=["capture_tls"]`: arah, waktu, ukuran; `request_id`/endpoint/status `null` |
 
 **Korelasi tanpa `request_id` di kabel.** Karena ID terenkripsi, observer memasangkan exchange TLS
-dengan log aplikasi di host yang sama berdasarkan **4-tuple koneksi** (IP:port client → port server)
-**dan kedekatan waktu** (≤ 5 detik, dipilih yang terdekat). Ini bekerja karena HTTP/1.1 dalam satu
-koneksi berurutan (request berikutnya baru dikirim setelah response). Inilah titik di mana
-metadata TCP yang di Fase 1 hanya "tambahan" menjadi satu-satunya jembatan — dan hasilnya lebih
-lemah: bergantung pada heuristik, bukan pada ID eksplisit.
+dengan log aplikasi di host yang sama dengan tiga syarat:
+1. **4-tuple koneksi sama** (IP:port client → port server);
+2. **kausalitas waktu**: log server harus berada *di dalam* rentang exchange di kabel
+   (request masuk ≤ `received_at`, `completed_at` ≤ response keluar), log client harus *mencakup*
+   rentang itu. Jam aplikasi dan jam capture di host yang sama terukur selaras ±1 ms; toleransi 2 ms;
+3. **pasangan terbaik timbal-balik**: exchange dan log harus saling memilih sebagai kandidat terbaik,
+   termasuk mempertimbangkan exchange yang masih berlangsung.
+
+Ini bekerja karena HTTP/1.1 dalam satu koneksi berurutan. Inilah titik di mana metadata TCP yang di
+Fase 1 hanya "tambahan" menjadi satu-satunya jembatan — dan hasilnya lebih rapuh: dua kali pencocokan
+sederhana "waktu terdekat" menukar pasangan di koneksi keep-alive (lihat §16 dan
+`docs/laporan-perjalanan.md`).
 
 **Cara exchange direkonstruksi dari record terenkripsi** (`observer/tls_flows.py`): record data dari
 client membuka request, record dari server setelahnya adalah response, record client berikutnya
-menutup exchange sebelumnya. Record pertama dari server setelah handshake TLS 1.3 adalah
-*NewSessionTicket* dan dilewati — tiket bisa datang *sesudah* request pertama (terjadi nyata di smoke
-test; ada regression test-nya).
+menutup exchange sebelumnya. Yang dilewati:
+- record terenkripsi server **sebelum** Finished dari client (sisa handshake; di NIC nyata dengan MTU
+  1500 datang di frame terpisah dari ServerHello, di loopback tidak);
+- gelombang pertama record server setelah handshake TLS 1.3 (*NewSessionTicket*) — bisa datang sebelum,
+  sesudah, atau bahkan di tengah request pertama;
+- record seukuran alert (≤ 24 B, mis. close_notify).
+
+`wire_latency_ms` diukur sampai record response **terakhir**; `wire_ttfb_ms` sampai yang **pertama**.
+Keduanya bisa berbeda jauh ketika response terpecah dan bagian kedua tertahan (lihat §16).
 
 ### 15.5 Keterbatasan Fase 2
 - Rekonstruksi exchange mengasumsikan HTTP/1.1 (tanpa pipelining) dan satu gelombang session ticket
@@ -603,6 +619,9 @@ test; ada regression test-nya).
 - Ukuran record adalah ukuran terenkripsi, bukan ukuran payload persis.
 - Korelasi 4-tuple hanya mungkin di host yang punya app log; observer pihak ketiga hanya punya
   metadata.
+- Pengecekan `/health` dari traffic generator tidak ditulis ke client log, jadi di host client
+  exchange itu muncul sebagai `evidence=["capture_tls"]` saja (benar secara data, bukan error).
+- Rekonstruksi mengasumsikan client ala OpenSSL yang mengirim ChangeCipherSpec sebelum Finished.
 
 ### 15.6 Troubleshooting TLS
 
@@ -614,7 +633,42 @@ test; ada regression test-nya).
 | `CONFIG ERROR TLS_CERT_FILE not found` | path relatif dihitung dari root project; cek `ls secrets/` |
 | Observer tidak menampilkan `WIRE TLS` | observer dijalankan dengan `--transport http` atau interface salah |
 
-## 16. Roadmap Fase 3: application-layer encryption (Fernet)
+## 16. Eksperimen transport: jeda ~40 ms dan koneksi baru per request
+
+Dijalankan 24 September 2026, HTTPS, arah **Kali → Windows**, 5 request, `--delay 5`, jaringan
+Host-Only. Server Windows memakai opsi baru `--tcp-nodelay` dan `--keep-alive`; client memakai
+`--keep-alive` (default semua opsi = perilaku asli).
+
+| Run | Server Windows | Client Kali | RTT client rata-rata (rentang) | Wire di server (POST) |
+|---|---|---|---|---|
+| A | default | default | 57,7 ms (46,0–95,7) | 39–48 ms |
+| B | `--tcp-nodelay` | default | 9,7 ms (5,8–13,8) | 3,2–4,3 ms |
+| C | `--tcp-nodelay --keep-alive 10` | default | 12,3 ms (7,1–17,1) | 2,9–3,9 ms |
+| D | `--tcp-nodelay --keep-alive 10` | `--keep-alive 10` | 5,3 ms (4,8–5,7) | 2,8–5,2 ms |
+
+**Temuan:**
+1. **Nagle di server Windows** (A → B). uvicorn/asyncio di Windows *tidak* mematikan Nagle: socket
+   yang diterima melaporkan `proto=0`, sehingga `asyncio.base_events._set_nodelay` melewatkannya
+   (diverifikasi langsung: `TCP_NODELAY=0` pada socket yang diterima). Setiap kali server mengirim
+   data kedua (response setelah session ticket, atau body setelah header) sementara data pertama
+   belum di-ACK, data itu ditahan sampai delayed ACK dari Linux (≈40 ms). Terlihat konsisten di dua
+   titik capture (Windows dan Kali). `--tcp-nodelay` memasang `TCP_NODELAY` di socket listening;
+   socket yang diterima mewarisinya (diverifikasi di Windows).
+2. **Handshake TCP+TLS per request** (B/C → D). Koneksi hanya dipakai ulang jika jeda antar-request
+   lebih pendek dari batas idle **di kedua sisi**; uvicorn dan httpx sama-sama default 5 detik. Run C
+   (hanya server yang dinaikkan) tidak membaik; Run D (keduanya) memakai **satu koneksi TLS** untuk
+   semua request. Biaya handshake di link ini ≈ 4–5 ms.
+3. **Anomali 95,7 ms di Run A (#4)**: konsisten dengan pacu batas idle 5 detik di client dan server
+   dengan jeda tepat 5 detik; tidak muncul di B–D. *Tidak terbukti langsung* — capture hanya berisi
+   record TLS, bukan FIN/RST.
+4. **Terbuka:** request pertama setelah server di-restart tertahan 20–50 ms *sebelum* middleware
+   mencatat `received_at` (terlihat di Fase 1, Run B, Run C). Penyebab belum diketahui.
+
+**Implikasi untuk perbandingan Fase 1 vs Fase 2:** kedua fase dijalankan dengan pengaturan Run A,
+sehingga selisih RTT yang terlihat bercampur dengan efek Nagle dan handshake per request.
+Perbandingan yang adil perlu diulang dengan pengaturan Run D di kedua arah (belum dilakukan).
+
+## 17. Roadmap Fase 3: application-layer encryption (Fernet)
 
 ```
 plaintext → Fernet encrypt → HTTPS/TLS → network → TLS terminate → Fernet decrypt → original payload
