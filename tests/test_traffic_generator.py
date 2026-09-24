@@ -83,7 +83,14 @@ def test_parse_args_defaults_are_safe(settings: Settings) -> None:
     assert args.count == 5 and args.delay == 5.0
 
 
+def test_keep_alive_defaults_to_httpx_default(settings: Settings) -> None:
+    args = parse_args(settings, ["--target", "http://10.0.0.1:8000"])
+    assert args.keep_alive == httpx.Limits().keepalive_expiry == 5.0
+    assert parse_args(settings, ["--target", "http://10.0.0.1:8000", "--keep-alive", "10"]).keep_alive == 10
+
+
 @pytest.mark.parametrize("argv", [
+    ["--keep-alive", "-1"],
     ["--count", "0"],
     ["--count", str(MAX_COUNT + 1)],
     ["--delay", "-1"],

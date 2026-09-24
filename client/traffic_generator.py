@@ -244,6 +244,9 @@ def parse_args(settings: Settings, argv: list[str] | None = None) -> argparse.Na
     parser.add_argument("--skip-health", action="store_true", help="do not call /health before sending")
     parser.add_argument("--log-file", type=Path, default=settings.log_dir / "client-events.jsonl",
                         help="where to append client records")
+    parser.add_argument("--keep-alive", type=float, default=settings.client_keep_alive,
+                        help="seconds an idle connection is kept for reuse (default: CLIENT_KEEP_ALIVE_SECONDS, "
+                             "5 = httpx default). With --delay >= this value every request opens a new connection")
     parser.add_argument("--ca-file", type=Path, default=settings.tls_ca_file,
                         help="CA certificate to trust for https targets (default: TLS_CA_FILE)")
     args = parser.parse_args(argv)
@@ -260,6 +263,8 @@ def parse_args(settings: Settings, argv: list[str] | None = None) -> argparse.Na
         parser.error("--timeout must be > 0")
     if not 0 <= args.retries <= 10:
         parser.error("--retries must be between 0 and 10")
+    if args.keep_alive < 0:
+        parser.error("--keep-alive must be >= 0")
     if not re.match(NODE_NAME_PATTERN, args.sender.lower()):
         parser.error("--sender must be lowercase letters/digits/dash, e.g. windows or kali")
     args.sender = args.sender.lower()
@@ -267,8 +272,11 @@ def parse_args(settings: Settings, argv: list[str] | None = None) -> argparse.Na
 
 
 def run(args: argparse.Namespace) -> int:
-    log.info("CLIENT sender=%s target=%s count=%d delay=%.1fs timeout=%.1fs retries=%d",
-             args.sender, args.target, args.count, args.delay, args.timeout, args.retries)
+    log.info("CLIENT sender=%s target=%s count=%d delay=%.1fs timeout=%.1fs retries=%d keep_alive=%.1fs",
+             args.sender, args.target, args.count, args.delay, args.timeout, args.retries, args.keep_alive)
+    if args.delay >= args.keep_alive:
+        log.info("NOTE delay >= keep-alive: expect a new TCP%s connection per request",
+                 "+TLS" if args.target.startswith("https://") else "")
     if args.delay < 1:
         log.warning("WARNING delay < 1s; keep delays reasonable in the lab")
 
@@ -279,7 +287,8 @@ def run(args: argparse.Namespace) -> int:
         return 2
 
     results: list[SendResult] = []
-    with httpx.Client(timeout=args.timeout, verify=verify) as client:
+    limits = httpx.Limits(keepalive_expiry=args.keep_alive)
+    with httpx.Client(timeout=args.timeout, verify=verify, limits=limits) as client:
         if not args.skip_health and not check_health(client, args.target, args.sender):
             return 2
         try:

@@ -27,6 +27,8 @@ from observer.tls_flows import TlsExchange, TlsExchangeTracker
 
 # A TLS exchange and an app-log entry on the same connection must start within this many seconds.
 TLS_MATCH_TOLERANCE_S = 5.0
+# App logs (ms precision) and capture timestamps on one host agreed within ~1 ms in the lab.
+CLOCK_TOLERANCE_S = 0.002
 
 
 def _epoch(iso: str | None) -> float | None:
@@ -78,6 +80,8 @@ class ExchangeCorrelator:
         entry.merge({
             "request_id": rec["request_id"],
             "timestamp": rec.get("sent_at"),
+            "client_sent_at": rec.get("sent_at"),
+            "client_completed_at": rec.get("completed_at"),
             "sender": rec.get("sender"),
             "receiver": rec.get("receiver"),
             "source_ip": rec.get("source_ip"),
@@ -107,6 +111,8 @@ class ExchangeCorrelator:
         entry.merge({
             "request_id": rec["request_id"],
             "timestamp": rec.get("received_at"),
+            "server_received_at": rec.get("received_at"),
+            "server_completed_at": rec.get("completed_at"),
             "sender": rec.get("sender"),
             "receiver": rec.get("receiver"),
             "source_ip": rec.get("source_ip"),
@@ -231,8 +237,31 @@ class ExchangeCorrelator:
         return now - entry.last_update >= limit
 
     @staticmethod
-    def _tls_distance(entry: _Pending, ex: TlsExchange) -> float | None:
-        """Seconds between entry and ex if they describe the same connection, else None."""
+    def _causally_consistent(f: dict[str, Any], ex: TlsExchange) -> bool | None:
+        """Does the app-log interval fit the wire interval of ex? None if it cannot be checked.
+
+        Same host, same clock (measured within ~1 ms), so causality must hold:
+          server log: request on wire <= received_at  and  completed_at <= response leaves
+          client log: sent_at <= request on wire      and  response arrives <= completed_at
+        Nearest-start matching is not enough: a slow first request (cold start) can be logged
+        closer in time to the NEXT request on the same connection than to its own.
+        """
+        if ex.response_end_time is None:
+            return None
+        eps = CLOCK_TOLERANCE_S
+        checks: list[bool] = []
+        received, done = _epoch(f.get("server_received_at")), _epoch(f.get("server_completed_at"))
+        if received is not None and done is not None:
+            checks.append(ex.request_time - eps <= received and done <= ex.response_end_time + eps)
+        sent, finished = _epoch(f.get("client_sent_at")), _epoch(f.get("client_completed_at"))
+        if sent is not None and finished is not None:
+            checks.append(sent <= ex.request_time + eps and ex.response_end_time - eps <= finished)
+        return any(checks) if checks else None
+
+    @classmethod
+    def _tls_score(cls, entry: _Pending, ex: TlsExchange) -> tuple[int, float] | None:
+        """Lower is better: (0 = causally consistent, 1 = could not check yet), time distance.
+        None if entry and ex cannot be the same exchange."""
         f = entry.fields
         if "capture_tls" in entry.evidence or "capture" in entry.evidence:
             return None
@@ -244,15 +273,20 @@ class ExchangeCorrelator:
         if started is None:
             return None
         distance = abs(started - ex.request_time)
-        return distance if distance <= TLS_MATCH_TOLERANCE_S else None
+        if distance > TLS_MATCH_TOLERANCE_S:
+            return None
+        consistent = cls._causally_consistent(f, ex)
+        if consistent is False:
+            return None
+        return (0 if consistent else 1, distance)
 
     def _best_tls_match(self, entry: _Pending, candidates: list[TlsExchange]) -> TlsExchange | None:
-        scored = [(d, ex) for ex in candidates if (d := self._tls_distance(entry, ex)) is not None]
-        return min(scored, key=lambda item: item[0])[1] if scored else None
+        scored = [(s, i, ex) for i, ex in enumerate(candidates) if (s := self._tls_score(entry, ex)) is not None]
+        return min(scored)[2] if scored else None
 
     def _best_entry_for(self, ex: TlsExchange) -> _Pending | None:
-        scored = [(d, e) for e in self._pending.values() if (d := self._tls_distance(e, ex)) is not None]
-        return min(scored, key=lambda item: item[0])[1] if scored else None
+        scored = [(s, i, e) for i, e in enumerate(self._pending.values()) if (s := self._tls_score(e, ex)) is not None]
+        return min(scored)[2] if scored else None
 
     def _all_tls_candidates(self) -> list[TlsExchange]:
         """Finished exchanges plus the ones still in progress on each connection."""

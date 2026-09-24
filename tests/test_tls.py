@@ -126,6 +126,39 @@ def test_https_rejects_certificate_for_other_ip(settings: Settings, tmp_path: Pa
         thread.join(timeout=5)
 
 
+def test_tcp_nodelay_listener_reaches_accepted_connections(settings: Settings, certs: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio.base_events as base_events
+
+    from server.api_server import _listening_socket
+
+    seen: list[int] = []
+    original = base_events._set_nodelay
+
+    def spy(sock: socket.socket) -> None:
+        original(sock)
+        seen.append(sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY))
+
+    monkeypatch.setattr(base_events, "_set_nodelay", spy)
+    port = _free_port()
+    listener = _listening_socket("127.0.0.1", port, tcp_nodelay=True)
+    server = uvicorn.Server(uvicorn.Config(create_app(settings), log_level="warning", timeout_keep_alive=10,
+                                           ssl_certfile=str(certs / "local.pem"),
+                                           ssl_keyfile=str(certs / "local.key")))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+    thread.start()
+    try:
+        while not server.started:
+            time.sleep(0.05)
+        target = f"https://127.0.0.1:{port}"
+        with httpx.Client(verify=build_verify(target, certs / "ca.pem"), timeout=5) as client:
+            assert send_one(client, target, build_payload("kali", 1), retries=0, retry_backoff=0).ok
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+    assert seen and all(value != 0 for value in seen)  # Nagle is off on the accepted connection
+
+
 def test_plain_http_to_https_server_fails_clearly(https_server: str) -> None:
     target = https_server.replace("https://", "http://")
     with httpx.Client(timeout=5) as client:
@@ -254,6 +287,25 @@ def test_unlogged_exchange_does_not_steal_next_requests_log() -> None:
     [health] = [e for e in events if not e["request_id"]]
     assert post["request_bytes"] == 472 and abs(post["wire_latency_ms"] - 47.93) < 0.1
     assert health["request_bytes"] == 246 and health["evidence"] == ["capture_tls"]
+
+
+def test_cold_start_request_is_matched_by_causality_not_nearest_time() -> None:
+    # Real Run C (Windows server, TCP_NODELAY): the first request after a server restart reached
+    # the middleware ~19 ms after it hit the wire, so its log time was closer to the NEXT request
+    # on the same connection. Nearest-time matching swapped /health and POST #1.
+    corr = ExchangeCorrelator("windows", merge_window=0, server_port=8000)
+    for rec in _load("runc_cold_start_server.jsonl"):
+        corr.add_server_record(rec)
+    for rec in _replay_capture("runc_cold_start_capture.jsonl"):
+        corr.add_capture_record(rec)
+    events = corr.flush(force=True)
+
+    assert len(events) == 6 and all(e["capture_match"] == "4tuple_time" for e in events)
+    [health] = [e for e in events if e["endpoint"] == "/health"]
+    assert (health["request_bytes"], health["response_bytes"]) == (246, 276)
+    for post in (e for e in events if e["endpoint"] == "/api/test"):
+        assert (post["request_bytes"], post["response_bytes"]) in {(472, 455), (472, 454)}
+        assert post["wire_latency_ms"] >= post["server_processing_ms"]
 
 
 def test_tls_tracker_ignores_alert_sized_client_records() -> None:

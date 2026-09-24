@@ -52,6 +52,17 @@ def _get_float(name: str, default: float) -> float:
         raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
 
 
+def _get_bool(name: str, default: bool) -> bool:
+    raw = _get_str(name).lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"{name} must be true/false, got {raw!r}")
+
+
 def _get_path(name: str) -> Path | None:
     """Optional file path; relative paths are resolved against the project root."""
     raw = _get_str(name)
@@ -98,6 +109,9 @@ class Settings:
     tls_cert_file: Path | None  # server certificate (enables HTTPS on the server)
     tls_key_file: Path | None
     tls_ca_file: Path | None  # CA the client trusts when TARGET_SCHEME=https
+    server_tcp_nodelay: bool  # disable Nagle on accepted connections (experiment switch)
+    server_keep_alive: int  # seconds an idle keep-alive connection stays open (uvicorn default 5)
+    client_keep_alive: float  # seconds the traffic generator keeps an idle connection (httpx default 5)
     env_file: Path | None
 
     @property
@@ -147,5 +161,8 @@ def load_settings() -> Settings:
         tls_cert_file=_get_path("TLS_CERT_FILE"),
         tls_key_file=_get_path("TLS_KEY_FILE"),
         tls_ca_file=_get_path("TLS_CA_FILE"),
+        server_tcp_nodelay=_get_bool("SERVER_TCP_NODELAY", False),
+        server_keep_alive=_get_int("SERVER_KEEP_ALIVE_SECONDS", 5),
+        client_keep_alive=_get_float("CLIENT_KEEP_ALIVE_SECONDS", 5.0),
         env_file=env_file,
     )

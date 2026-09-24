@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
+import socket
 import sys
 import time
 from dataclasses import replace
@@ -148,7 +150,28 @@ def _parse_args(settings: Settings, argv: list[str] | None) -> argparse.Namespac
     parser.add_argument("--host", default=settings.app_host, help="bind address (default: APP_HOST)")
     parser.add_argument("--port", type=int, default=settings.app_port, help="bind port (default: APP_PORT)")
     parser.add_argument("--node-name", default=settings.node_name, help="this host's name (default: NODE_NAME)")
+    # Experiment switches (defaults keep the original behaviour):
+    parser.add_argument("--tcp-nodelay", action=argparse.BooleanOptionalAction, default=settings.server_tcp_nodelay,
+                        help="disable Nagle on accepted connections (default: SERVER_TCP_NODELAY, off)")
+    parser.add_argument("--keep-alive", type=int, default=settings.server_keep_alive,
+                        help="idle keep-alive timeout in seconds (default: SERVER_KEEP_ALIVE_SECONDS, 5)")
     return parser.parse_args(argv)
+
+
+def _listening_socket(host: str, port: int, tcp_nodelay: bool) -> socket.socket:
+    """Bind the listening socket ourselves so TCP_NODELAY can be set on it.
+
+    Accepted connections inherit TCP_NODELAY from the listening socket (checked on Windows and
+    Linux). asyncio tries to set it per connection too, but on Windows the accepted socket reports
+    proto=0 and asyncio silently skips it, so Nagle stays ON there unless set here.
+    """
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    if os.name == "posix":
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # not on Windows: allows port hijacking
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1 if tcp_nodelay else 0)
+    sock.bind((host, port))
+    return sock
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -176,16 +199,27 @@ def main(argv: list[str] | None = None) -> int:
     log.info("SERVER node=%s listening on %s://%s:%s", settings.node_name, scheme, settings.app_host, settings.app_port)
     if tls_kwargs:
         log.info("SERVER TLS certificate %s", settings.tls_cert_file)
+    log.info("SERVER tcp_nodelay=%s keep_alive=%ss",
+             "forced on" if args.tcp_nodelay else "not forced (asyncio default: Nagle stays on under Windows)",
+             args.keep_alive)
     log.info("SERVER app events -> %s", settings.log_dir / "server-events.jsonl")
+    config = uvicorn.Config(
+        create_app(settings),
+        host=settings.app_host,
+        port=settings.app_port,
+        log_level="warning",  # our middleware already logs every request
+        access_log=False,
+        timeout_keep_alive=args.keep_alive,
+        **tls_kwargs,  # type: ignore[arg-type]
+    )
     try:
-        uvicorn.run(
-            create_app(settings),
-            host=settings.app_host,
-            port=settings.app_port,
-            log_level="warning",  # our middleware already logs every request
-            access_log=False,
-            **tls_kwargs,  # type: ignore[arg-type]
-        )
+        sockets = None
+        if args.tcp_nodelay:
+            sockets = [_listening_socket(settings.app_host, settings.app_port, tcp_nodelay=True)]
+        uvicorn.Server(config).run(sockets=sockets)
+    except OSError as exc:
+        log.error("SERVER cannot listen on %s:%s: %s", settings.app_host, settings.app_port, exc)
+        return 2
     except KeyboardInterrupt:
         pass
     log.info("SERVER stopped")
