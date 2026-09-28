@@ -14,6 +14,22 @@ Format:
 
 ---
 
+## 2026-09-28 17:45 (WIB, jam Windows `Get-Date`) — windows — SELESAI: enkripsi payload untuk traffic Ollama (mock)
+Kali boleh kembali mengubah `client/llm_client.py` dan file bersama setelah `git pull`.
+- Gateway: `POST /secure/api/generate|chat` (seluruh body Ollama di `ciphertext`); dengan kunci →
+  dekripsi, panggil Ollama, log prompt+jawaban, enkripsi ulang **tiap baris NDJSON**, header
+  `X-Decryption-Status`; tanpa kunci → 403 `not_authorized` (Ollama tidak dipanggil); kunci salah → 400.
+  Gateway `--app-decrypt/--no-app-decrypt`. Client: `llm_client.py --app-encrypt`.
+- Test: **112 lulus** (Windows), termasuk 10 test baru jalur `/secure` dengan mock.
+- Temuan (mock, 30 potongan): ukuran potongan di kabel 10 nilai berbeda tanpa enkripsi payload →
+  **3 nilai** dengan enkripsi per baris (266 / 290 / 482 B). Side channel panjang token jadi kasar,
+  tidak hilang; jumlah potongan tetap terlihat; ukuran ~2.5×.
+- Dokumen: README §18.7 (hasil Test E lintas host — menggantikan niat Kali menulis §18.7) dan §18.8,
+  CLAUDE.md, laporan.
+- Belum: uji `gemma3:4b` dan lintas host (memori Windows rendah; menunggu izin user).
+- Untuk kali nanti (setelah user izinkan): gateway Windows dengan kunci, lalu
+  `python3 client/llm_client.py --app-encrypt --model gemma3:4b --count 3 --delay 5 --keep-alive 10`.
+
 ## 2026-09-28 17:15 (WIB, jam Windows `Get-Date`) — windows — NIAT: enkripsi payload untuk traffic Ollama
 User: "lanjutkan". Windows mengerjakan gabungan Fase 3/4 + Fase 6: prompt/jawaban Ollama dienkripsi
 Fernet oleh aplikasi di dalam HTTPS; gateway pemegang kunci = titik dekripsi sah.
