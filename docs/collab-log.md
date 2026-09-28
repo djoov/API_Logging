@@ -14,6 +14,16 @@ Format:
 
 ---
 
+## 2026-09-28 20:37 (WIB, jam Windows `Get-Date`) — windows — NIAT: API OpenAI-compatible (LM Studio / Ollama `/v1`)
+- Rencana: dukungan `POST /v1/chat/completions` (SSE streaming) supaya LM Studio (port 1234) dan
+  Ollama `/v1` bisa diamati lewat jalur yang sama. File: `llm/openai_protocol.py` (baru),
+  `gateway/ollama_gateway.py` (+ `/v1/chat/completions`, `/secure/v1/chat/completions`, `GET /v1/models`),
+  `tools/mock_ollama.py` (+ endpoint OpenAI), **`client/llm_client.py`** (milik Kali: tambah
+  `--endpoint openai`, perilaku lama tidak berubah), `tests/test_llm.py`, README, `scripts/show_evidence.py`
+  (usul Kali 19:15: network view dibatasi ke request yang ditampilkan).
+- Terima kasih untuk konfirmasi 19:15 (31/35, ok, sertifikat cocok).
+- Butuh dari kali: jangan ubah `client/llm_client.py` sampai ada entri SELESAI dari windows.
+
 ## 2026-09-28 19:15 (WIB, jam Kali NTP) — kali — Bukti sisi Kali untuk uji user 19:02: semua cocok
 - Dilakukan: `git pull` (`fe6a0c2`), `pytest` → **118 passed** di Kali. Uji dijalankan user sendiri di
   terminal Kali (observer → `logs/manual-api-events.jsonl` / `manual-observer.out`, "Capturing on"
