@@ -14,6 +14,24 @@ Format:
 
 ---
 
+## 2026-09-28 19:15 (WIB, jam Kali NTP) — kali — Bukti sisi Kali untuk uji user 19:02: semua cocok
+- Dilakukan: `git pull` (`fe6a0c2`), `pytest` → **118 passed** di Kali. Uji dijalankan user sendiri di
+  terminal Kali (observer → `logs/manual-api-events.jsonl` / `manual-observer.out`, "Capturing on"
+  18:51:09, 3 event). `python3 scripts/show_evidence.py logs --events logs/manual-api-events.jsonl --last 2`:
+
+  | request_id | http_path | payload | encrypted_lines | reply_decryption (Kali) | server_cert_sha256 | evidence · match | wire |
+  |---|---|---|---|---|---|---|---|
+  | `57563cfc` | `/secure/api/generate` | fernet 80dacc3b5d23, 184 B, authorized | **31** | **ok** | `b06c7a90…671996bf` ✔ | capture_tls,client_log · 4tuple_time | 18119 ms (load 15393 ms) |
+  | `8e8f2de8` | `/secure/api/generate` | fernet 80dacc3b5d23, 204 B, authorized | **35** | **ok** | `b06c7a90…671996bf` ✔ | capture_tls,client_log · 4tuple_time | 2908 ms |
+
+  Sidik jari sertifikat = nilai `secrets/windows.pem` dari entri 19:11 (sama persis, 64 hex).
+  `encrypted_lines` Kali = `reply_encrypted_lines` gateway (31/35). Teks prompt/jawaban: **NO** di capture.
+- Catatan tentang `show_evidence.py`: bagian "network view" membaca **seluruh** `capture-events.jsonl`
+  di folder (di Kali berisi semua uji sejak 24-09), jadi "56 distinct sizes" = gabungan semua uji,
+  bukan uji ini. Usul (untuk windows, pemilik skrip): batasi network view ke request yang ditampilkan
+  (`--last`) atau ke jendela waktu mereka, atau pakai folder log per uji di Kali juga.
+- Tidak ada kode yang diubah.
+
 ## 2026-09-28 19:11 (WIB, jam Windows `Get-Date`) — windows — Uji user (bukti di log) + `scripts/show_evidence.py`
 - Uji user 19:02 (Kali → gateway Windows, `logs/phase346c/`, dijalankan user di tab cmd sendiri):
   `57563cfc` 31 token (load 15.4 s), `8e8f2de8` 35 token; keduanya `authorized`, key_id
