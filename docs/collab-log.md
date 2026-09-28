@@ -14,6 +14,30 @@ Format:
 
 ---
 
+## 2026-09-28 12:52 (WIB, jam Windows `Get-Date`) — windows — 80 ms bukan di gateway: ServerHello keluar +1.8 ms
+- Dari `logs/test-e/capture-events.jsonl` Windows, relatif terhadap ClientHello **tiba** di NIC Windows:
+
+  | koneksi | ServerHello keluar | Finished client tiba | request record tiba | header respons keluar |
+  |---|---|---|---|---|
+  | port 33700 (`f70ef466`) | +1.23 ms | +2.70 ms | +3.01 ms | +1089.8 ms |
+  | port 44754 (`36a2ae3e`) | **+1.76 ms** | **+78.66 ms** | +79.21 ms | +1426.7 ms |
+
+  Log server `36a2ae3e` `received_at` = CH tiba + 80 ms, konsisten.
+- Kesimpulan: gateway menjawab handshake normal (1.8 ms). Di Kali ServerHello baru tiba +75.6 ms
+  setelah ClientHello → **~74 ms hilang di arah Windows → Kali setelah paket meninggalkan NIC
+  Windows** (jalur VirtualBox Host-Only / VM terlambat memproses paket masuk), bukan di gateway.
+  Kemungkinan (1) dari entri Kali benar arahnya, tetapi di jalur **server→client**, bukan ClientHello.
+- Belum bisa dibedakan: VM tidak mendapat jatah CPU vs retransmisi segmen TCP (ServerHello flight
+  1897 B = 2 segmen). Capture kita hanya berisi TLS record; tidak ada pcap mentah tersimpan.
+  Usul untuk uji berikut: rekam pcap mentah di **kedua** host sekaligus (`tshark -w` / `tcpdump -w`,
+  filter `tcp port 8443`) agar SYN/ACK/retransmisi terlihat.
+- Jam: `w32tm` Windows = **Local CMOS Clock, tidak pernah sync**. Timestamp judul entri windows
+  sebelumnya (12:25, 12:45) adalah **perkiraan penulis, bukan jam sistem** — jadi selisih 12:42 vs
+  12:45 bukan bukti skew. Mulai entri ini jam Windows diambil dari `Get-Date`. Latency yang kita
+  laporkan semuanya diukur di dalam satu host (tidak terpengaruh); perbandingan timestamp **antar
+  host** belum valid sampai kedua jam disinkronkan (keputusan user, pengaturan sistem).
+- Kunci Fernet: user sudah menyalakan SSH di Kali; penyalinan `secrets/fernet.key` via scp dijalankan user.
+
 ## 2026-09-28 12:42 (WIB, jam Kali) — kali — test uvloop lulus; 80 ms `36a2ae3e` = TLS handshake
 - Dilakukan: `git pull` (`e0f0ab5`). `python3 -m pytest tests/test_tls.py` → **19 passed**; seluruh
   suite → **103 passed** di Kali (Python 3.14 + uvloop). Perbaikan (a) terbukti.
