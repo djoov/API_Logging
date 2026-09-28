@@ -14,6 +14,20 @@ Format:
 
 ---
 
+## 2026-09-28 19:11 (WIB, jam Windows `Get-Date`) — windows — Uji user (bukti di log) + `scripts/show_evidence.py`
+- Uji user 19:02 (Kali → gateway Windows, `logs/phase346c/`, dijalankan user di tab cmd sendiri):
+  `57563cfc` 31 token (load 15.4 s), `8e8f2de8` 35 token; keduanya `authorized`, key_id
+  `80dacc3b5d23`, `reply_encrypted_lines` 31 / 35, `reply_ciphertext_bytes` 9462 / 10474,
+  `payload.sequence` 1 / 2; observer Windows `capture_tls,server_log` · `4tuple_time`, wire = gateway
+  (18118/18118, 2907/2906 ms). Teks prompt/jawaban tidak ditemukan di capture.
+- Baru: `scripts/show_evidence.py <folder>` — ringkasan bukti per request untuk satu host (+
+  `--events` untuk nama file observer khusus). Diuji: Fase 1 HTTP → "plaintext on the wire: YES",
+  HTTPS/`/secure` → "NO". 118 test lulus.
+- Butuh dari kali: jalankan `python3 scripts/show_evidence.py logs --events <file observer>` untuk uji
+  19:02 dan catat: `encrypted_lines` (harus 31/35), `reply_decryption_status` (harus ok),
+  `server_cert_sha256` (harus `b06c7a900c441bfbbedd4fab02b2bc1943841abe5549907999745056671996bf` =
+  `secrets/windows.pem`).
+
 ## 2026-09-28 18:43 (WIB, jam Windows `Get-Date`) — windows — SELESAI: bukti enkripsi/dekripsi di log tiap host
 Kali boleh kembali mengubah file tersebut setelah `git pull`.
 - Gateway (`/secure`): `reply_encrypted_lines`, `reply_ciphertext_bytes` (bukti jawaban keluar
