@@ -403,9 +403,12 @@ host**. Lewat Wi-Fi publik, penyelarasan jam antar host hanya teliti puluhan mil
 | 12 | 2 — HTTPS | Exchange tertukar (health check) | observer | Selesai + regression test + mutation check |
 | 13 | 3 — Investigasi | Exchange tertukar (cold start) | observer | Selesai + regression test + mutation check |
 | 14 | 3 — Investigasi | Keep-alive client terlewat | eksperimen | Selesai |
+| 15 | 5 — Enkripsi Ollama | Log gateway "selesai" 22–28 ms setelah byte terakhir terkirim (stream upstream baru ditutup), sehingga aturan **kausalitas** menolak semua pasangan capture↔log | observer/gateway | Selesai + regression test; diverifikasi live dengan capture |
+| 16 | 5 — Enkripsi Ollama | Skrip demo diam-diam memakai Ollama asli karena port mock sudah terpakai | tooling | Selesai (skrip menolak jalan) |
+| 17 | 5 — Enkripsi Ollama | Laptop lag berat saat model 4B + VM + dua capture berjalan bersamaan; RAM bebas hanya 2–5 GB, model hanya ~46% muat di VRAM GTX 1650 Ti (4 GB) | sumber daya | Dikurangi dengan menutup aplikasi lain; perlu diperhatikan tiap uji |
 | – | 3 — Investigasi | Penyebab **cold start** 20–50 ms | terbuka | **Belum diketahui** |
 
-Total **103 unit test** lulus (per 28-09). Semua bug observer (#8, #10–#13) punya regression test berbasis
+Total **114 unit test** lulus (per 28-09). Semua bug observer (#8, #10–#13, #15) punya regression test berbasis
 **rekaman asli** dari kejadiannya.
 
 ---

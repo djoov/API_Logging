@@ -21,6 +21,7 @@ param(
     [switch]$Capture,
     [switch]$NoStream,
     [switch]$RealOllama,
+    [switch]$AppEncrypt,  # Phase 3/4: /secure path, demo Fernet key for gateway and client
     [string]$Interface = "\Device\NPF_Loopback",
     [string]$LogDir = "logs/demo-llm"
 )
@@ -55,6 +56,13 @@ $env:TLS_CERT_FILE = Join-Path $certDir "local.pem"
 $env:TLS_KEY_FILE = Join-Path $certDir "local.key"
 $env:TLS_CA_FILE = Join-Path $certDir "ca.pem"
 $env:OLLAMA_URL = "http://127.0.0.1:$MockPort"
+$env:FERNET_KEY_FILE = ""
+$demoKey = Join-Path $certDir "fernet.key"
+if ($AppEncrypt) {
+    # Demo-only key (never the real lab key); the gateway is the authorized decryption point.
+    if (-not (Test-Path $demoKey)) { & $Python scripts/make_fernet_key.py --file $demoKey | Out-Null }
+    $env:FERNET_KEY_FILE = $demoKey
+}
 $env:OBSERVER_MERGE_WINDOW_SECONDS = "1"
 $env:OBSERVER_TLS_IDLE_SECONDS = "10"
 $env:OBSERVER_INCOMPLETE_TIMEOUT_SECONDS = "300"
@@ -71,6 +79,11 @@ function Wait-Port([int]$port) {
 
 try {
     if (-not $RealOllama) {
+        # A real Ollama usually already owns 11434; then the mock cannot start and the gateway would
+        # silently talk to the real one. Refuse instead of producing a misleading test.
+        if (Get-NetTCPConnection -State Listen -LocalPort $MockPort -ErrorAction SilentlyContinue) {
+            throw "port $MockPort is already in use (real Ollama?). Use -MockPort 11500, or -RealOllama"
+        }
         $procs += Start-Process -PassThru -NoNewWindow -FilePath $Python `
             -ArgumentList "tools/mock_ollama.py", "--port", "$MockPort" `
             -RedirectStandardOutput "$absLogDir\mock.out" -RedirectStandardError "$absLogDir\mock.err"
@@ -103,6 +116,7 @@ try {
     $clientArgs = @("client/llm_client.py", "--target", "https://127.0.0.1:$GatewayPort", "--sender", "client-host",
                     "--model", $Model, "--count", "$Count", "--delay", "$Delay")
     if ($NoStream) { $clientArgs += "--no-stream" }
+    if ($AppEncrypt) { $clientArgs += @("--app-encrypt", "--key-file", $demoKey) }
     & $Python @clientArgs
     $clientExit = $LASTEXITCODE
     Write-Host "[llm-demo] waiting for observer ($observerSeconds s window) ..."

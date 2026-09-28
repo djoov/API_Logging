@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -128,8 +129,16 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
                  client_port, request_id, sender or "-",
                  f' model={model} stream={stream} prompt="{_preview(prompt)}"' if is_llm else "")
 
-        def write_record(status: int, assembler: OllamaResponseAssembler | None, error: str | None) -> None:
-            total_ms = (time.perf_counter() - started) * 1000
+        def write_record(status: int, assembler: OllamaResponseAssembler | None, error: str | None,
+                         finished: tuple[float, datetime] | None = None) -> None:
+            """finished = (perf_counter, UTC time) when the last byte was handed to the client.
+
+            For a streamed answer this is earlier than "now": the upstream Ollama stream closes some
+            ms after its last piece. Logging "now" made completed_at later than the last record on
+            the wire, which the observer's causality check (correctly) rejects.
+            """
+            done_perf, done_at = finished or (time.perf_counter(), utc_now())
+            total_ms = (done_perf - started) * 1000
             llm: dict[str, Any] | None = None
             if is_llm:
                 summary = assembler.summary() if assembler else {}
@@ -150,7 +159,7 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
                 "node": settings.node_name,
                 "request_id": request_id,
                 "received_at": to_iso(received_at),
-                "completed_at": to_iso(utc_now()),
+                "completed_at": to_iso(done_at),
                 "source_ip": client_ip,
                 "source_port": client_port,
                 "destination_ip": server_addr[0],
@@ -231,6 +240,7 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
         async def relay() -> AsyncIterator[bytes]:
             error: str | None = None
             pending = b""
+            last_forward: tuple[float, datetime] | None = None
             try:
                 # Forward each piece as soon as it arrives: streaming must stay streaming.
                 async for chunk in upstream.aiter_raw():
@@ -240,13 +250,17 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
                         *lines, pending = pending.split(b"\n")
                         out = b"".join(sealed(line) for line in lines if line.strip())
                         if out:
+                            last_forward = (time.perf_counter(), utc_now())
                             yield out
                         continue
                     if assembler:
                         assembler.feed_bytes(chunk, time.perf_counter())
+                    last_forward = (time.perf_counter(), utc_now())
                     yield chunk
                 if secure and pending.strip():
-                    yield sealed(pending)  # non-streaming answer: one JSON object without newline
+                    out = sealed(pending)  # non-streaming answer: one JSON object without newline
+                    last_forward = (time.perf_counter(), utc_now())
+                    yield out
                 if assembler and not secure:
                     assembler.close(time.perf_counter())
             except httpx.HTTPError as exc:
@@ -257,7 +271,7 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
                 raise
             finally:
                 await upstream.aclose()
-                write_record(upstream.status_code, assembler, error)
+                write_record(upstream.status_code, assembler, error, last_forward)
 
         media_type = "application/x-ndjson" if secure else upstream.headers.get("content-type")
         return StreamingResponse(relay(), status_code=upstream.status_code, media_type=media_type,

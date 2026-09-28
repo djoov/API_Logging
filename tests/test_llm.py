@@ -254,3 +254,46 @@ def test_per_line_encryption_coarsens_token_sizes(secure_lab: dict[str, Any]) ->
     encrypted_sizes = [len(l) for l in lines]
     assert len(set(encrypted_sizes)) < len(set(plaintext_sizes))
     assert len(lines) == len(plaintext_sizes)  # piece count is still visible
+
+
+# ---- regression: streamed answers and the causality check ------------------
+
+def _load_fixture(name: str) -> list[dict[str, Any]]:
+    path = Path(__file__).parent / "fixtures" / name
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _correlate_secure_stream(shift_completed_ms: float = 0.0) -> list[dict[str, Any]]:
+    from datetime import timedelta
+
+    from observer.capture_backend import CaptureRecord
+
+    corr = ExchangeCorrelator("gateway-host", merge_window=0, server_port=8443, tls_idle=30)
+    for rec in _load_fixture("secure_stream_gateway.jsonl"):
+        if shift_completed_ms:
+            done = datetime.fromisoformat(rec["completed_at"].replace("Z", "+00:00"))
+            rec["completed_at"] = (done + timedelta(milliseconds=shift_completed_ms)).isoformat()
+        corr.add_server_record(rec)
+    for data in _load_fixture("secure_stream_capture.jsonl"):
+        data.pop("request_id", None)
+        corr.add_capture_record(CaptureRecord(**data))
+    return [e for e in corr.flush(force=True) if e["request_id"]]
+
+
+def test_streamed_secure_answers_match_capture() -> None:
+    # Real capture of 3 streamed /secure answers (mock Ollama, loopback, 2026-09-28). The gateway now
+    # logs completed_at = when the last piece was handed to the client, so causality holds.
+    events = _correlate_secure_stream()
+    assert len(events) == 3
+    for event in events:
+        assert "capture_tls" in event["evidence"] and event["capture_match"] == "4tuple_time"
+        assert event["decryption_status"] == "authorized"
+        assert abs(event["wire_latency_ms"] - event["server_processing_ms"]) < 5
+
+
+def test_log_written_after_stream_close_breaks_matching() -> None:
+    # Regression for the cross-host /secure run: the gateway used to log completed_at when the
+    # upstream Ollama stream CLOSED, 22-28 ms after the last piece left. The observer then refused
+    # every pairing (server "finished" after its last byte was on the wire).
+    events = _correlate_secure_stream(shift_completed_ms=25)
+    assert all("capture_tls" not in e["evidence"] for e in events)

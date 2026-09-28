@@ -944,3 +944,27 @@ diuji dengan `gemma3:4b` maupun lintas host.
 Fernet (AES-CBC, blok 16 byte) membulatkan ukuran sehingga side channel panjang token **menjadi
 kasar tetapi tidak hilang**; **jumlah potongan (≈ jumlah token) tetap terlihat persis**, dan ukuran
 di kabel naik ~2.5×. Angka ini dari teks mock (token = kata); perlu diulang dengan model asli.
+
+**Lintas host dengan `gemma3:4b` (2026-09-28, Kali → Windows, 3/3 `authorized`):** client Kali
+`--app-encrypt --count 3 --delay 5 --keep-alive 10`; satu koneksi TCP untuk ketiganya.
+
+| request | token | client total (Kali) | gateway total | Ollama total | record jawaban di kabel |
+|---|---|---|---|---|---|
+| `1cf42442` | 276 | 24702 ms | 24601 | 24593 | 278 (2 ukuran token: 290/314 B) |
+| `c79a25f4` | 116 | 10185 ms | 10180 | 10173 | 118 |
+| `65107368` | 766 | 80562 ms | 80547 | 80496 | 768 |
+
+Ukuran record sama persis di pcap Windows dan Kali. Record terakhir (baris `done` + `context`)
+tumbuh dengan jumlah token (1634 / 2810 / 6435 B) — kebocoran ukuran tambahan. Ukuran di kabel
+~312 B/token vs ~137 B/token tanpa enkripsi payload.
+
+**Bug yang ditemukan di uji ini (sudah diperbaiki):** observer Windows gagal memasangkan ketiga
+exchange dengan capture (hanya `server_log`). Penyebab: gateway menulis `completed_at` saat stream
+upstream Ollama **ditutup**, 22–28 ms setelah potongan terakhir diteruskan, sehingga aturan
+kausalitas (log server harus selesai sebelum byte terakhir terlihat di kabel) menolaknya. Sekarang
+`completed_at` = waktu potongan terakhir diserahkan ke client; diverifikasi live dengan capture dan
+dijaga dua regression test. Uji live juga menemukan `run_llm_demo.ps1` diam-diam memakai Ollama asli
+bila port mock (11434) sudah terpakai — kini skrip menolak; pakai `-MockPort 11500`.
+
+Catatan: `endpoint` di log dan event berisi endpoint Ollama (`/api/generate`), bukan path HTTP
+`/secure/api/generate`; status enkripsi dibedakan lewat `app_encryption`/`decryption_status`.
