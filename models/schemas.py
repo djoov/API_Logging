@@ -188,6 +188,13 @@ class ApiExchangeEvent(BaseModel):
     # "authorized" (key holder decrypted), "not_authorized" (no key, payload unread),
     # "failed" (wrong key / tampered), None (payload not encrypted)
     decryption_status: str | None = None
+    # Evidence per host: the gateway re-encrypted the answer (lines, bytes); the client decrypted
+    # it (encrypted_lines received, reply_decryption_status "ok"/"failed") from this certificate.
+    reply_encrypted_lines: int | None = None
+    reply_ciphertext_bytes: int | None = None
+    encrypted_lines: int | None = None
+    reply_decryption_status: str | None = None
+    server_cert_sha256: str | None = None
     # Phase 6 (Ollama): model, full prompt and answer, time to first token, token statistics.
     # Filled only from the app logs of the LLM client / gateway, never from encrypted capture.
     llm: dict[str, Any] | None = None

@@ -33,7 +33,12 @@ SERVER_RECORD_TYPES = ("server_exchange", "llm_gateway_exchange")
 CLOCK_TOLERANCE_S = 0.002
 
 
-SECURITY_FIELDS = ("app_encryption", "key_id", "ciphertext_bytes", "decryption_status")
+SECURITY_FIELDS = (
+    "app_encryption", "key_id", "ciphertext_bytes", "decryption_status",
+    # evidence written by each host: reply encrypted by the gateway, decrypted by the client
+    "reply_encrypted_lines", "reply_ciphertext_bytes", "encrypted_lines", "reply_decryption_status",
+    "server_cert_sha256",
+)
 
 
 def _security_fields(rec: dict[str, Any]) -> dict[str, Any]:
@@ -458,5 +463,10 @@ class ExchangeCorrelator:
             key_id=f.get("key_id"),
             ciphertext_bytes=f.get("ciphertext_bytes"),
             decryption_status=f.get("decryption_status"),
+            reply_encrypted_lines=f.get("reply_encrypted_lines"),
+            reply_ciphertext_bytes=f.get("reply_ciphertext_bytes"),
+            encrypted_lines=f.get("encrypted_lines"),
+            reply_decryption_status=f.get("reply_decryption_status"),
+            server_cert_sha256=f.get("server_cert_sha256"),
         )
         return event.to_record()

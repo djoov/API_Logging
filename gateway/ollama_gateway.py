@@ -172,7 +172,8 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
                 "server_processing_ms": round(total_ms, 3),  # gateway view: includes Ollama's time
                 "sender": sender,
                 "receiver": settings.node_name,
-                "payload": {"message": _preview(prompt, 200) if prompt else None, "sender": sender},
+                "payload": {"message": _preview(prompt, 200) if prompt else None, "sender": sender,
+                            "sequence": envelope.sequence if envelope else None},
                 "llm": llm,
                 "error": error,
                 **security,  # Phase 3/4: app_encryption, key_id, ciphertext_bytes, decryption_status
@@ -249,7 +250,11 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
                         # Encrypt per complete line so the client can still stream-decrypt.
                         pending += chunk
                         *lines, pending = pending.split(b"\n")
-                        out = b"".join(sealed(line) for line in lines if line.strip())
+                        sealed_lines = [sealed(line) for line in lines if line.strip()]
+                        out = b"".join(sealed_lines)
+                        # Evidence that the answer left this host encrypted, line by line.
+                        security["reply_encrypted_lines"] = security.get("reply_encrypted_lines", 0) + len(sealed_lines)
+                        security["reply_ciphertext_bytes"] = security.get("reply_ciphertext_bytes", 0) + len(out)
                         if out:
                             last_forward = (time.perf_counter(), utc_now())
                             yield out
@@ -260,6 +265,8 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
                     yield chunk
                 if secure and pending.strip():
                     out = sealed(pending)  # non-streaming answer: one JSON object without newline
+                    security["reply_encrypted_lines"] = security.get("reply_encrypted_lines", 0) + 1
+                    security["reply_ciphertext_bytes"] = security.get("reply_ciphertext_bytes", 0) + len(out)
                     last_forward = (time.perf_counter(), utc_now())
                     yield out
                 if assembler and not secure:

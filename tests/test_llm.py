@@ -1,8 +1,10 @@
 """Phase 6 tests: Ollama protocol parsing, HTTPS gateway + mock Ollama + LLM client end to end."""
 from __future__ import annotations
 
+import hashlib
 import json
 import socket
+import ssl
 import threading
 import time
 from contextlib import contextmanager
@@ -104,7 +106,8 @@ def _running_lab(settings: Settings, tmp_path: Path, app_key: bytes | None) -> I
     target = f"https://127.0.0.1:{gateway_port}"
     client = httpx.Client(verify=build_verify(target, certs / "ca.pem"), timeout=30)
     try:
-        yield {"target": target, "client": client, "settings": gw_settings, "ollama_port": ollama_port}
+        yield {"target": target, "client": client, "settings": gw_settings, "ollama_port": ollama_port,
+               "certs": certs}
     finally:
         client.close()
         for server, thread in (gateway, ollama):
@@ -203,6 +206,14 @@ def test_secure_prompt_authorized_gateway(secure_lab: dict[str, Any], endpoint: 
     assert record["endpoint"] == endpoint and record["request_id"] == result.request_id
     assert record["http_path"] == "/secure" + endpoint and result.http_path == "/secure" + endpoint
 
+    # Evidence of encryption/decryption on EACH host:
+    assert record["reply_encrypted_lines"] == result.encrypted_lines > 0  # gateway sent it encrypted...
+    assert record["reply_ciphertext_bytes"] > 0
+    assert result.reply_decryption_status == "ok"  # ...and this client decrypted it
+    assert record["payload"]["sequence"] == 1
+    der = ssl.PEM_cert_to_DER_cert((secure_lab["certs"] / "gw.pem").read_text())
+    assert result.server_cert_sha256 == hashlib.sha256(der).hexdigest()  # verified THIS certificate
+
 
 def _raw_secure_post(lab: dict[str, Any], key: bytes, prompt: str = "isi rahasia", stream: bool = True) -> httpx.Response:
     envelope = build_secure_envelope(build_body("/api/generate", "mock-llm", prompt, stream), new_request_id(),
@@ -298,3 +309,18 @@ def test_log_written_after_stream_close_breaks_matching() -> None:
     # every pairing (server "finished" after its last byte was on the wire).
     events = _correlate_secure_stream(shift_completed_ms=25)
     assert all("capture_tls" not in e["evidence"] for e in events)
+
+
+def test_correlator_carries_encryption_evidence_from_both_logs() -> None:
+    rid = new_request_id()
+    corr = ExchangeCorrelator("windows", merge_window=0)
+    corr.add_client_record({"record_type": "llm_client_exchange", "request_id": rid, "sent_at": "2026-09-28T12:00:00.000Z",
+                            "status_code": 200, "app_encryption": "fernet", "decryption_status": "authorized",
+                            "encrypted_lines": 26, "reply_decryption_status": "ok", "server_cert_sha256": "ab" * 32})
+    corr.add_server_record({"record_type": "llm_gateway_exchange", "request_id": rid, "received_at": "2026-09-28T12:00:00.010Z",
+                            "status_code": 200, "app_encryption": "fernet", "decryption_status": "authorized",
+                            "reply_encrypted_lines": 26, "reply_ciphertext_bytes": 7000})
+    [event] = corr.flush(force=True)
+    assert event["reply_encrypted_lines"] == event["encrypted_lines"] == 26
+    assert event["reply_decryption_status"] == "ok" and event["reply_ciphertext_bytes"] == 7000
+    assert event["server_cert_sha256"] == "ab" * 32

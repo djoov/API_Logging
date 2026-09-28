@@ -26,7 +26,14 @@ if __package__ in (None, ""):
 
 import httpx
 
-from client.traffic_generator import _explain_connect_error, _socket_addresses, _tls_info, build_verify, check_health
+from client.traffic_generator import (
+    _explain_connect_error,
+    _server_cert_sha256,
+    _socket_addresses,
+    _tls_info,
+    build_verify,
+    check_health,
+)
 from common.config import ConfigError, Settings, load_settings
 from common.jsonl import append_jsonl
 from common.logging_utils import get_logger, to_iso, utc_now
@@ -76,6 +83,8 @@ class LlmResult:
     decryption_status: str | None = None  # reported by the gateway (X-Decryption-Status)
     encrypted_lines: int = 0  # encrypted NDJSON pieces received
     http_path: str = ""  # actual HTTP path used (/api/... or /secure/api/...)
+    reply_decryption_status: str | None = None  # "ok" / "failed": did THIS host decrypt the reply
+    server_cert_sha256: str | None = None  # certificate this connection verified
 
     @property
     def ok(self) -> bool:
@@ -127,6 +136,7 @@ def send_prompt(client: httpx.Client, base_url: str, endpoint: str, model: str, 
             result.decryption_status = response.headers.get(HEADER_DECRYPTION)
             result.local_addr, result.remote_addr = _socket_addresses(response)
             result.tls_version, result.tls_cipher = _tls_info(response)
+            result.server_cert_sha256 = _server_cert_sha256(response)
             if app_key:
                 # Each streamed piece is its own encrypted line: decrypt as they arrive.
                 for line in response.iter_lines():
@@ -147,6 +157,7 @@ def send_prompt(client: httpx.Client, base_url: str, endpoint: str, model: str, 
     except httpx.ConnectError as exc:
         result.error = _explain_connect_error(exc)
     except PayloadCryptoError as exc:
+        result.reply_decryption_status = "failed"
         result.error = f"could not decrypt the gateway's answer: {exc}"
     except httpx.TimeoutException as exc:
         result.error = f"timeout after waiting for the model: {type(exc).__name__}"
@@ -155,6 +166,8 @@ def send_prompt(client: httpx.Client, base_url: str, endpoint: str, model: str, 
     if show and shown:
         print(flush=True)
 
+    if app_key and result.encrypted_lines and result.reply_decryption_status is None:
+        result.reply_decryption_status = "ok"
     result.total_ms = round((time.perf_counter() - started) * 1000, 3)
     if assembler.first_chunk_at is not None:
         result.ttft_ms = round((assembler.first_chunk_at - started) * 1000, 3)
@@ -193,7 +206,10 @@ def _record(result: LlmResult, args: argparse.Namespace) -> dict[str, Any]:
         "app_encryption": result.app_encryption,
         "key_id": result.key_id,
         "ciphertext_bytes": result.ciphertext_bytes,
-        "decryption_status": result.decryption_status,
+        "decryption_status": result.decryption_status,  # reported by the gateway
+        "encrypted_lines": result.encrypted_lines if result.app_encryption else None,
+        "reply_decryption_status": result.reply_decryption_status,
+        "server_cert_sha256": result.server_cert_sha256,
         "sender": args.sender,
         "receiver": result.receiver,
         "attempts": 1,

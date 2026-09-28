@@ -6,6 +6,7 @@ Example (from the project root or from client/):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import ssl
 import statistics
@@ -102,6 +103,19 @@ def _tls_info(response: httpx.Response) -> tuple[str | None, str | None]:
         return None, None
     cipher = ssl_object.cipher()
     return ssl_object.version(), cipher[0] if cipher else None
+
+
+def _server_cert_sha256(response: httpx.Response) -> str | None:
+    """SHA-256 of the server certificate this connection actually verified (proof of which server)."""
+    stream = response.extensions.get("network_stream")
+    try:
+        ssl_object = stream.get_extra_info("ssl_object") if stream is not None else None
+        # Positional arg: httpcore hands out the low-level _ssl._SSLSocket, whose getpeercert()
+        # rejects the keyword form (binary_form=True) that ssl.SSLSocket accepts.
+        der = ssl_object.getpeercert(True) if ssl_object is not None else None
+    except Exception:
+        return None
+    return hashlib.sha256(der).hexdigest() if der else None
 
 
 def build_verify(target: str, ca_file: Path | None) -> ssl.SSLContext | bool:
