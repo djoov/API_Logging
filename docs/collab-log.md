@@ -14,6 +14,33 @@ Format:
 
 ---
 
+## 2026-09-28 12:42 (WIB, jam Kali) — kali — test uvloop lulus; 80 ms `36a2ae3e` = TLS handshake
+- Dilakukan: `git pull` (`e0f0ab5`). `python3 -m pytest tests/test_tls.py` → **19 passed**; seluruh
+  suite → **103 passed** di Kali (Python 3.14 + uvloop). Perbaikan (a) terbukti.
+- Hasil (80 ms `36a2ae3e`), dari `logs/capture-events.jsonl` Kali, relatif terhadap `sent_at` client:
+
+  | | ClientHello keluar | ServerHello tiba | CH→SH | request record | record respons pertama (header) |
+  |---|---|---|---|---|---|
+  | `f70ef466` (stream 1) | +2.3 ms | +4.0 ms | **1.7 ms** | +5.3 ms | +1092.5 ms |
+  | `36a2ae3e` (stream 2) | +3.4 ms | +79.0 ms | **75.6 ms** | +82.6 ms | +1430.1 ms |
+
+  Jadi seluruh ekstra ~76–80 ms ada **di antara ClientHello dan ServerHello**. TCP connect (sebelum
+  ClientHello) dan jalur client normal. Setelah handshake, request→header = 1347.5 ms, sama
+  dengan gateway TTFT 1346 ms. Filter tampilan observer (`http || tls`) tidak menampilkan SYN/ACK
+  atau retransmisi. Hanya ada 1 ClientHello (tidak terlihat dikirim ulang).
+- Kemungkinan: (1) ClientHello terlambat di jalur VirtualBox host-only, atau (2) gateway Windows
+  lambat menjawab handshake (accept/event loop sibuk, CPU dipakai Ollama/VM). Data Kali saja tidak
+  bisa membedakan keduanya.
+- Butuh dari windows: di capture Windows untuk port client 44754 (28-09 ~11:54:20.7 WIB): waktu
+  ClientHello **tiba** dan ServerHello **keluar**. Kalau CH tiba ~+3 ms lalu SH keluar ~+78 ms →
+  gateway lambat; kalau CH baru tiba ~+77 ms → jalur jaringan/VM. Kalau pcap masih ada, cek juga
+  SYN/SYN-ACK dan retransmisi.
+- Catatan: jam Kali 12:42 saat entri ini ditulis, sedangkan entri Windows di bawah bertanda 12:45.
+  Mungkin ada selisih jam antar host (cek `w32tm /query /status` dan `timedatectl`); penting untuk
+  perbandingan timestamp lintas host.
+- Fase 3/4 lintas host: **menunggu `secrets/fernet.key`** (belum ada di Kali). Setelah disalin: `.env`
+  + `FERNET_KEY_FILE`, cek key_id `80dacc3b5d23`, lalu uji Kali → Windows dan Windows → Kali.
+
 ## 2026-09-28 12:45 (WIB) — windows — SELESAI: test uvloop, penomoran fase, Fase 3/4 (1 mesin)
 Kali boleh kembali mengubah `client/` dan file bersama setelah `git pull`.
 - (a) `test_tcp_nodelay_...` kini memaksa `loop="asyncio"`. Di Windows tidak ada uvloop, jadi
