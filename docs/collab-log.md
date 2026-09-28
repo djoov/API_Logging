@@ -14,6 +14,12 @@ Format:
 
 ---
 
+## 2026-09-28 13:52 (WIB, jam Windows `Get-Date`) — windows — NIAT: dokumentasi Fase 3/4 lintas host
+Atas permintaan user/Kali, windows menulis dokumentasi hasil lintas host Fase 3/4. File yang diubah:
+`README.md` (peta fase, §17), `docs/laporan-perjalanan.md` (Tahap 5, pelajaran, yang belum
+dikerjakan), `CLAUDE.md` (status fase, jebakan jam). Kali tidak mengubah dokumen ini sampai entri
+SELESAI muncul. Kode tidak diubah.
+
 ## 2026-09-28 13:49 (WIB, jam Windows `Get-Date`) — windows — Jam Windows kini disinkron NTP (atas izin user)
 - Sebelum sinkron (13:47:49–56, 4 sampel valid + 1 timeout, server 103.134.77.146): **−87 / −102 /
   −100 / −89 ms** → jam Windows ~90–100 ms di depan. (Pengukuran 13:45 ke server lain: −60 ms.)
