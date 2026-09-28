@@ -14,6 +14,31 @@ Format:
 
 ---
 
+## 2026-09-28 13:32 (WIB, jam Windows `Get-Date`) — windows — Fase 3/4 lintas host: 9/9 sesuai harapan
+- Setelan Windows: `server/api_server.py --tcp-nodelay --keep-alive 10`, `FERNET_KEY_FILE`
+  (AUTHORIZED key_id `80dacc3b5d23`); observer Ethernet 2 `tcp port 8000 --transport https`;
+  pcap mentah `logs/phase34/phase34-windows.pcapng` (tidak di-commit). Client Windows
+  `traffic_generator.py --app-encrypt --count 3 --delay 5 --keep-alive 10`.
+
+  | Uji | arah | request_id | status | decryption_status | isi pesan di log server | evidence (observer Windows) |
+  |---|---|---|---|---|---|---|
+  | 1 Test D | kali→windows | `77a0cbb0` `5c11c299` `c0baf1ea` | 200 | authorized | **ya** ("hello from kali #1–3") | capture_tls,server_log · 4tuple_time |
+  | 2 Test D | windows→kali | `408464ca` `02e38823` `2ac810b4` | 200 | authorized | (server Kali; lihat entri Kali) | capture_tls,client_log · 4tuple_time |
+  | 2 Test C | windows→kali | `36995e4e` `a77adb90` `476527e1` | 200 | not_authorized | (server Kali; harus null) | capture_tls,client_log · 4tuple_time |
+
+- Client Windows: Uji 2 Test D RTT avg 6.5 ms (5.8–7.7), balasan terenkripsi server Kali terbaca
+  (`received_chars: 21`); Test C RTT avg 8.8 ms, `reply=None`. Server Windows (Uji 1) processing
+  1.0 / 3.0 / 15.3 ms. `ciphertext_bytes` = 140 untuk semua.
+- pcap mentah Windows: 111 paket, **0 retransmisi, 0 dup ACK, 0 reset**. Hanya **3 koneksi TCP**
+  (satu per uji → keep-alive 10 s di kedua sisi berhasil). SYN→SYN/ACK 0.62–0.69 ms; ClientHello→
+  ServerHello di NIC Windows 1.21 ms (server Windows) dan 1.70 / 1.81 ms (server Kali, termasuk
+  jalan pulang-pergi). Jeda ~76 ms **tidak muncul** di sesi ini.
+- Catatan: `payload.message` di event windows→kali berasal dari **client log Windows** (Windows
+  memang pengirim, tahu plaintext) — bukan bukti server Kali membacanya. Bukti Test C ada di log
+  server Kali.
+- Butuh dari kali: konfirmasi dari log server Kali bahwa Test D = isi pesan ada, Test C =
+  `payload.message` null; hasil pcap Kali (retransmisi, CH→SH per koneksi).
+
 ## 2026-09-28 13:04 (WIB, jam Kali `date`) — kali — KALI SIAP UJI 1 (Kali → Windows, Test D)
 - Dilakukan: `git pull` (`239ea6d`). `secrets/fernet.key` ada, mode 600, `--show` →
   **key_id=80dacc3b5d23** ✔. `.env` + `FERNET_KEY_FILE=secrets/fernet.key`; `TARGET_HOST=192.168.56.1`,
