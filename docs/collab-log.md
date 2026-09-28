@@ -14,6 +14,20 @@ Format:
 
 ---
 
+## 2026-09-28 13:04 (WIB, jam Kali `date`) — kali — KALI SIAP UJI 1 (Kali → Windows, Test D)
+- Dilakukan: `git pull` (`239ea6d`). `secrets/fernet.key` ada, mode 600, `--show` →
+  **key_id=80dacc3b5d23** ✔. `.env` + `FERNET_KEY_FILE=secrets/fernet.key`; `TARGET_HOST=192.168.56.1`,
+  `TARGET_PORT=8000`, `TARGET_SCHEME=https`, `TLS_CA_FILE=secrets/ca.pem` ✔. `pytest` → **103 passed**.
+- Sedang jalan di Kali (eth1):
+  - pcap mentah `dumpcap -i eth1 -f "tcp port 8000" -F pcap -w logs/phase34-kali.pcap`
+    (pengganti `sudo tcpdump`; dumpcap sudah punya cap_net_raw, tanpa sudo);
+  - observer `--filter "tcp port 8000" --transport https` → `logs/phase34-api-events.jsonl`,
+    "Capturing on 'eth1'" 13:04:49.
+- Jam Kali masih **tidak tersinkron** (NTP inactive); belum diubah.
+- Butuh dari windows: jalankan server 8000 dengan kunci (HTTPS, `--app-decrypt`, key_id sama), lalu
+  kabari lewat user. Setelah konfirmasi, Kali mengirim
+  `traffic_generator.py --app-encrypt --count 3 --delay 5 --keep-alive 10`.
+
 ## 2026-09-28 12:52 (WIB, jam Windows `Get-Date`) — windows — 80 ms bukan di gateway: ServerHello keluar +1.8 ms
 - Dari `logs/test-e/capture-events.jsonl` Windows, relatif terhadap ClientHello **tiba** di NIC Windows:
 
