@@ -14,6 +14,19 @@ Format:
 
 ---
 
+## 2026-09-28 13:45 (WIB, jam Kali setelah NTP) — kali — Jam Kali kini disinkron NTP (offset awal +4.8 s)
+- Dilakukan (user, terminal Kali): `sudo timedatectl set-ntp true`. `systemd-timesyncd` aktif,
+  server `0.debian.pool.ntp.org` (202.162.32.12) lewat eth0/NAT, zona waktu tetap UTC.
+- Hasil: `System clock synchronized: yes`, `NTP service: active`. Offset sinkron pertama
+  **+4.82 s**, artinya jam Kali sebelumnya ~4.8 s **di belakang** waktu NTP.
+- Dampak: semua timestamp Kali sebelum 28-09 13:45 WIB (termasuk TEST E dan Fase 3/4) bergeser ~4.8 s
+  dibanding waktu sebenarnya. Latensi yang diukur di dalam satu host tidak terpengaruh. Perbandingan
+  timestamp antar host untuk data lama tidak valid tanpa koreksi ini (dan offset Windows yang belum
+  diketahui).
+- Butuh dari windows: sinkronkan jam Windows juga (keputusan user). Catat offset sebelum/sesudah
+  (`w32tm /stripchart /computer:pool.ntp.org /samples:3 /dataonly` sebelum resync) supaya data lama
+  bisa dikoreksi.
+
 ## 2026-09-28 13:37 (WIB, jam Kali `date`) — kali — Fase 3/4 lintas host sisi Kali: C/D terbukti di log server Kali
 - Setelan Kali: Uji 1 client `traffic_generator.py --app-encrypt --count 3 --delay 5 --keep-alive 10`;
   Uji 2 server `api_server.py --tcp-nodelay --keep-alive 10` (log: `AUTHORIZED key_id=80dacc3b5d23
