@@ -157,6 +157,7 @@ class ApiExchangeEvent(BaseModel):
     destination_port: int | None = None
     method: str | None = None
     endpoint: str | None = None
+    http_path: str | None = None  # when it differs from endpoint (e.g. /secure/api/generate)
     status_code: int | None = None
     latency_ms: float | None = None
     latency_source: str | None = None

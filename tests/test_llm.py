@@ -201,6 +201,7 @@ def test_secure_prompt_authorized_gateway(secure_lab: dict[str, Any], endpoint: 
     assert record["decryption_status"] == "authorized" and record["key_id"] == key_id(GATEWAY_KEY)
     assert record["llm"]["prompt"] == prompt and record["llm"]["response"] == result.response
     assert record["endpoint"] == endpoint and record["request_id"] == result.request_id
+    assert record["http_path"] == "/secure" + endpoint and result.http_path == "/secure" + endpoint
 
 
 def _raw_secure_post(lab: dict[str, Any], key: bytes, prompt: str = "isi rahasia", stream: bool = True) -> httpx.Response:

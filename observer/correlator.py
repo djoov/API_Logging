@@ -109,6 +109,7 @@ class ExchangeCorrelator:
             "error": rec.get("error"),
             "target": rec.get("target"),
             "transport": rec.get("transport"),
+            "http_path": rec.get("http_path"),
             "tls_version": rec.get("tls_version"),
             "tls_cipher": rec.get("tls_cipher"),
             **_security_fields(rec),
@@ -139,6 +140,7 @@ class ExchangeCorrelator:
             "status_code": rec.get("status_code"),
             "server_processing_ms": rec.get("server_processing_ms"),
             "transport": rec.get("transport"),
+            "http_path": rec.get("http_path"),
             **_security_fields(rec),
         })
         self._merge_payload(entry, rec.get("payload"))
@@ -431,6 +433,7 @@ class ExchangeCorrelator:
             destination_port=f.get("destination_port"),
             method=f.get("method"),
             endpoint=f.get("endpoint"),
+            http_path=f.get("http_path"),
             status_code=f.get("status_code"),
             latency_ms=latency,
             latency_source=latency_source,

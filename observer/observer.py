@@ -110,7 +110,10 @@ def _log_event(event: dict[str, Any]) -> None:
         # Encrypted exchange with no app log on this host: the HTTP details are simply not visible.
         request = f"<encrypted {event['request_bytes']}B -> {event['response_bytes']}B>"
     else:
-        request = f"{event['method']} {event['endpoint']}"
+        path = event.get("http_path") or event["endpoint"]
+        request = f"{event['method']} {path}"
+        if event.get("decryption_status"):
+            request += f" [payload {event.get('app_encryption')}: {event['decryption_status']}]"
     log.info("OBSERVED %s -> %s [%s%s] %s status=%s latency=%s request_id=%s evidence=%s%s",
              sender, receiver, event.get("transport") or "?", tls, request,
              event["status_code"] if event["status_code"] is not None else "?", latency,

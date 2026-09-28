@@ -75,6 +75,7 @@ class LlmResult:
     ciphertext_bytes: int | None = None
     decryption_status: str | None = None  # reported by the gateway (X-Decryption-Status)
     encrypted_lines: int = 0  # encrypted NDJSON pieces received
+    http_path: str = ""  # actual HTTP path used (/api/... or /secure/api/...)
 
     @property
     def ok(self) -> bool:
@@ -116,6 +117,7 @@ def send_prompt(client: httpx.Client, base_url: str, endpoint: str, model: str, 
         path = SECURE_PREFIX + endpoint
         result.app_encryption, result.key_id = ALGORITHM, body["key_id"]
         result.ciphertext_bytes = len(body["ciphertext"])
+    result.http_path = path
     started = time.perf_counter()
     shown = 0
     try:
@@ -177,7 +179,8 @@ def _record(result: LlmResult, args: argparse.Namespace) -> dict[str, Any]:
         "completed_at": to_iso(utc_now()),
         "target": args.target,
         "method": "POST",
-        "endpoint": args.endpoint,
+        "endpoint": args.endpoint,  # Ollama API endpoint
+        "http_path": result.http_path,  # actual HTTP path
         "transport": "https" if args.target.startswith("https://") else "http",
         "tls_version": result.tls_version,
         "tls_cipher": result.tls_cipher,

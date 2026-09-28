@@ -165,7 +165,8 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
                 "destination_ip": server_addr[0],
                 "destination_port": server_addr[1],
                 "method": request.method,
-                "endpoint": endpoint,
+                "endpoint": endpoint,  # Ollama API endpoint
+                "http_path": request.url.path,  # actual HTTP path, e.g. /secure/api/generate
                 "transport": request.url.scheme,
                 "status_code": status,
                 "server_processing_ms": round(total_ms, 3),  # gateway view: includes Ollama's time
