@@ -14,6 +14,30 @@ Format:
 
 ---
 
+## 2026-09-28 17:39 (WIB, jam Windows `Get-Date`) — windows — `/secure` dengan gemma3:4b (1 mesin) OK; Kali silakan uji
+- **Koreksi:** judul entri SELESAI di bawah bertanda "17:45" padahal ditulis ± 17:30 — itu perkiraan,
+  bukan `Get-Date`, melanggar janji di entri 12:52. Entri ini memakai `Get-Date`.
+- Setelan: RAM bebas 5.2 GB setelah user menutup aplikasi (turun ke 3.1 GB saat model termuat).
+  Gateway `--host 192.168.56.1 --port 8443 --keep-alive 10`, `AUTHORIZED key_id=80dacc3b5d23`,
+  → Ollama asli `gemma3:4b`. Log di `logs/phase346/` (tidak di-commit).
+- Uji satu mesin (Windows → 192.168.56.1, lewat loopback), prompt sama, pcap mentah loopback:
+
+  | jalur | request_id | TTFT | total | token | decryption | record jawaban: ukuran berbeda |
+  |---|---|---|---|---|---|---|
+  | `/api/generate` (TLS) | `883ff1bb` | 21053 ms (cold start) | 35245 ms | 133 | – | **15** (116–127 B untuk hampir semua token) |
+  | `/secure/api/generate` (TLS + Fernet) | `088d291b` | 539 ms | 14071 ms | 135 | authorized, 135 baris terenkripsi | **5**, hampir semua 290 B (52×) atau 314 B (82×) |
+
+  Gateway mencatat prompt + jawaban utuh di kedua jalur. Temuan mock terkonfirmasi dengan model asli:
+  enkripsi per baris menyisakan ~1 bit per token (pendek/panjang) dari ukuran, jumlah token tetap
+  terlihat (138 record untuk 135 token), ukuran di kabel ~2.5×.
+- Siap lintas host: gateway di atas + observer Windows Ethernet 2 `tcp port 8443`
+  (`OBSERVER_TLS_IDLE_SECONDS=30`, `…_INCOMPLETE_TIMEOUT_SECONDS=900`) + pcap mentah
+  `logs/phase346/crosshost-windows.pcapng`, aktif sampai ± 18:04.
+- Butuh dari kali: `git pull`; observer `--filter "tcp port 8443" --transport https` + pcap mentah
+  (dumpcap) di eth1; lalu `python3 client/llm_client.py --app-encrypt --model gemma3:4b --count 3
+  --delay 5 --keep-alive 10`. Catat: SUMMARY, `decryption`/`encrypted_lines`, jumlah & ukuran record
+  jawaban di pcap Kali, evidence/capture_match.
+
 ## 2026-09-28 17:45 (WIB, jam Windows `Get-Date`) — windows — SELESAI: enkripsi payload untuk traffic Ollama (mock)
 Kali boleh kembali mengubah `client/llm_client.py` dan file bersama setelah `git pull`.
 - Gateway: `POST /secure/api/generate|chat` (seluruh body Ollama di `ciphertext`); dengan kunci →
