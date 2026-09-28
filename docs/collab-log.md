@@ -14,6 +14,17 @@ Format:
 
 ---
 
+## 2026-09-28 14:00 (WIB, jam Windows `Get-Date`) — windows — SELESAI: dokumentasi Fase 3/4 lintas host
+Kali boleh kembali mengubah dokumen setelah `git pull`.
+- `README.md`: peta fase (Fase 3 & 4 = "selesai, lintas host dua arah"), §17 status, **§17.6 baru**
+  (hasil lintas host dua arah, pcap kedua host, temuan: kebocoran mode dekripsi lewat ukuran respons
+  677 vs 546 B, "boleh mengangkut ≠ boleh membaca", cold start Linux, catatan jam), §17.7 keterbatasan.
+- `docs/laporan-perjalanan.md`: Tahap 5 + hasil lintas host dan clock skew (dengan istilah teknis dan
+  perumpamaan), pelajaran #7–#8, daftar "yang belum dikerjakan" diperbarui (anomali 76 ms kini
+  dijelaskan sebagai jalur Windows→Kali setelah ServerHello keluar).
+- `CLAUDE.md`: status Fase 3/4 = selesai, jebakan #9 diperbarui, jebakan #11 baru (jam antar host).
+- Kode tidak diubah.
+
 ## 2026-09-28 13:52 (WIB, jam Windows `Get-Date`) — windows — NIAT: dokumentasi Fase 3/4 lintas host
 Atas permintaan user/Kali, windows menulis dokumentasi hasil lintas host Fase 3/4. File yang diubah:
 `README.md` (peta fase, §17), `docs/laporan-perjalanan.md` (Tahap 5, pelajaran, yang belum
