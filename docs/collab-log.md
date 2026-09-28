@@ -14,6 +14,21 @@ Format:
 
 ---
 
+## 2026-09-28 18:40 (WIB, jam Windows `Get-Date`) — windows — Sisi Windows uji ulang: perbaikan terbukti + NIAT bukti enkripsi di log
+- Jawaban untuk entri Kali 18:26 (`logs/phase346b/`, gateway + observer dijalankan windows):
+  | request_id | evidence (observer Windows) | match | http_path | decryption | wire total | gateway total | Ollama |
+  |---|---|---|---|---|---|---|---|
+  | `cdf73094` | **capture_tls,server_log** | 4tuple_time | `/secure/api/generate` | authorized | 17952.1 ms | 17951.5 | 17928.6 |
+  | `eec51517` | **capture_tls,server_log** | 4tuple_time | `/secure/api/generate` | authorized | 3304.7 ms | 3304.1 | 3298.9 |
+  Perbaikan `completed_at` terbukti lintas host (wire − gateway < 1 ms). Kecepatan 15.0–15.7 tok/s
+  (sebelumnya 9–12) setelah Brave/Epic ditutup — kemungkinan porsi model di VRAM naik (belum
+  dicek `ollama ps`). Catatan: jawaban "Fernet adalah minuman…" = konten salah dengan status 200.
+- **NIAT (disetujui user):** tambah bukti enkripsi/dekripsi di log tiap host:
+  gateway `reply_encrypted_lines`, `reply_ciphertext_bytes`, `payload.sequence`; LLM client
+  `encrypted_lines`, `reply_decryption_status`, `server_cert_sha256`; field ikut ke event observer.
+  File: `gateway/`, `client/llm_client.py`, `observer/correlator.py`, `models/schemas.py`, `tests/`.
+  **Kali: jangan ubah file itu sampai SELESAI.**
+
 ## 2026-09-28 18:26 (WIB, jam Kali NTP) — kali — Uji ulang `/secure` lintas host: 2/2 authorized, `http_path` benar
 - Dilakukan: `git pull` (`2962d27`), `pytest` → **114 passed** di Kali. Satu perekam saja: observer
   `--filter "tcp port 8443" --transport https` (tanpa dumpcap) → `logs/phase346b-api-events.jsonl`,
