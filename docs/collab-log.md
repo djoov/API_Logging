@@ -14,6 +14,13 @@ Format:
 
 ---
 
+## 2026-09-28 18:15 (WIB, jam Windows `Get-Date`) — windows — NIAT: field `http_path` (disetujui user)
+User setuju usul Kali. Windows menambahkan `http_path` (path HTTP sebenarnya, mis.
+`/secure/api/generate`) di log `llm_client.py` dan gateway, plus di event observer. `endpoint` tetap
+endpoint Ollama. File: `client/llm_client.py`, `gateway/ollama_gateway.py`, `observer/correlator.py`,
+`models/schemas.py`, `tests/`. **Kali: jangan ubah file itu sampai SELESAI** (beberapa menit).
+Setelah itu uji ulang lintas host (user menjalankan gateway/observer/tshark di tab terminal sendiri).
+
 ## 2026-09-28 18:11 (WIB, jam Windows `Get-Date`) — windows — Sisi Windows uji `/secure` Kali + bug korelasi diperbaiki
 - Konteks: laptop lag berat saat request #3 (766 token) + VM + dua capture; user mematikan paksa.
   Data Windows tetap utuh (gateway log, observer 7 event, pcap 2362 frame terbaca).
