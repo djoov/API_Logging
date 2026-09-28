@@ -14,8 +14,8 @@ observability**, bukan monitoring CPU/GPU/RAM.
 |---|---|---|---|---|
 | 1 | HTTP plaintext | A | selesai, dua arah | §6–§9 |
 | 2 | HTTPS/TLS | B | selesai, dua arah (+ eksperimen transport §16) | §15 |
-| 3 | Enkripsi payload application-layer (Fernet) | C | diuji 1 mesin; lintas host belum | §17 |
-| 4 | Dekripsi sah + observability | D | diuji 1 mesin; lintas host belum | §17 |
+| 3 | Enkripsi payload application-layer (Fernet) | C | selesai, lintas host dua arah | §17 |
+| 4 | Dekripsi sah + observability | D | selesai, lintas host dua arah | §17 |
 | 5 | Korelasi dua arah | F | selesai untuk API lab; belum untuk traffic Ollama | §9, §16 |
 | 6 | Workload Ollama asli lewat HTTPS gateway | E | lintas host Kali → Windows OK | §18 |
 | 7 | Analisis AI / deteksi anomali | – | belum | – |
@@ -697,8 +697,8 @@ plaintext → Fernet encrypt (client) → HTTPS/TLS → network → TLS terminat
           → Fernet decrypt HANYA oleh pemegang kunci → plaintext → log / observability
 ```
 
-Status per 2026-09-28: **diimplementasikan dan diuji di satu mesin** (loopback, dengan capture).
-**Belum diuji lintas host Windows ↔ Kali.**
+Status per 2026-09-28: **diimplementasikan, diuji di satu mesin (§17.5) dan lintas host
+Windows ↔ Kali dua arah (§17.6): 9/9 request sesuai harapan.**
 
 ### 17.1 Cara kerja
 - Endpoint baru **`POST /api/secure-test`** (endpoint `/api/test` Fase 1/2 tidak berubah).
@@ -757,10 +757,43 @@ urutan, dan bahwa payload terenkripsi**, dan bisa mengkorelasi lewat `request_id
 Dengan TLS + enkripsi payload, bahkan komponen yang membuka TLS (mis. server tanpa kunci / proxy)
 tidak bisa membaca isi.
 
-### 17.6 Keterbatasan
+### 17.6 Hasil lintas host Windows ↔ Kali (2026-09-28, Host-Only)
+Setelan kedua server: `--tcp-nodelay --keep-alive 10`, HTTPS; client `--app-encrypt --count 3
+--delay 5 --keep-alive 10`; kunci yang sama di kedua host (`key_id=80dacc3b5d23`, disalin via scp).
+Observer + pcap mentah di **kedua** host.
+
+| Uji | Arah | decryption_status | Isi pesan di log server | RTT client |
+|---|---|---|---|---|
+| 1 — Test D | Kali → Windows | 3× `authorized` | ✔ "hello from kali #1–3" (server Windows) | avg 11.3 ms (5.6–20.3) |
+| 2 — Test D | Windows → Kali | 3× `authorized` | ✔ "hello from windows #1–3" (server Kali); balasan terenkripsi terbaca di Windows | avg 6.5 ms (5.8–7.7) |
+| 2 — Test C | Windows → Kali | 3× `not_authorized` | ✘ `null`; string pesan tidak ada di record maupun stdout server Kali | avg 8.8 ms (6.9–10.6) |
+
+- Semua 9 exchange terkorelasi di **kedua** observer (`capture_tls` + log aplikasi,
+  `capture_match=4tuple_time`); `request_id` dan `ciphertext_bytes` (140) identik di kedua sisi.
+- pcap mentah kedua host: **0 retransmisi, 0 duplicate ACK, 0 reset**; hanya **3 koneksi TCP** untuk
+  9 request (keep-alive 10 s di kedua sisi → satu koneksi per uji). SYN→SYN/ACK 0.1–1.2 ms,
+  ClientHello→ServerHello 0.9–2.2 ms. Jeda ~76 ms yang sekali muncul di Test E (Fase 6) tidak terulang.
+
+**Temuan:**
+1. **Mode dekripsi server bocor lewat ukuran respons.** Request identik (envelope 637 B), tetapi
+   respons Test D 677 B (berisi balasan terenkripsi) vs Test C 546 B. Penyadap TLS bisa membedakan
+   server yang memegang kunci dari yang tidak, tanpa mendekripsi apa pun (lanjutan temuan "ukuran
+   tetap bocor" di §15 dan §18).
+2. **Enkripsi payload memisahkan "boleh mengangkut" dari "boleh membaca".** Server Test C menjalankan
+   API secara normal (status 200, logging, korelasi) tanpa pernah melihat isi pesan.
+3. **Cold start juga di Linux:** `/health` pertama setelah restart server Kali ≈ 40 ms, berikutnya
+   3.7–8.4 ms (sama dengan pola Windows di §16).
+
+**Jam antar host (untuk membaca timestamp mentah):** sebelum 28-09 13:45 jam Kali ~4.82 s di
+belakang NTP; jam Windows ~60–100 ms di depan NTP sampai disinkron 13:48 (sisa ~65 ms, dikoreksi
+bertahap). Semua latency di atas diukur di dalam satu host, jadi tidak terpengaruh. Lewat Wi-Fi
+publik, penyelarasan jam antar host hanya teliti puluhan ms.
+
+### 17.7 Keterbatasan
 - Kunci simetris tunggal untuk lab (tanpa rotasi, tanpa per-pasangan host).
 - `sent_at` tidak dipakai sebagai TTL Fernet (tidak ada perlindungan replay di lab ini).
 - Belum diterapkan ke traffic Ollama (Fase 6); gateway saat ini hanya TLS.
+- Setiap uji hanya 3 request per arah; cukup untuk membuktikan perilaku, belum untuk statistik latency.
 
 ## 18. Fase 6: Ollama lewat HTTPS gateway (prompt & jawaban di kedua host)
 

@@ -43,8 +43,8 @@ Environment Python: conda env **`api-observability`** (`environment.yml`). Test:
 | 1 | HTTP plaintext, correlation via `request_id` | A | selesai, diuji dua arah |
 | 2 | HTTPS/TLS, observer membaca TLS record tanpa dekripsi, korelasi 4-tuple + kausalitas | B | selesai, diuji dua arah |
 | – | Eksperimen transport Run A–D (Nagle di Windows, keep-alive) | – | selesai, README §16 |
-| 3 | Enkripsi payload application-layer (Fernet), `POST /api/secure-test`, `--app-encrypt` | C | diuji 1 mesin (2026-09-28); **lintas host belum** |
-| 4 | Dekripsi sah: server dengan `FERNET_KEY_FILE` = `authorized`, tanpa = `not_authorized` | D | diuji 1 mesin (2026-09-28); **lintas host belum** |
+| 3 | Enkripsi payload application-layer (Fernet), `POST /api/secure-test`, `--app-encrypt` | C | selesai: 1 mesin + lintas host dua arah 9/9 (2026-09-28), README §17.6 |
+| 4 | Dekripsi sah: server dengan `FERNET_KEY_FILE` = `authorized`, tanpa = `not_authorized` | D | selesai: lintas host dua arah (2026-09-28); kunci `key_id=80dacc3b5d23` di kedua host |
 | 5 | Korelasi dua arah | F | selesai untuk API lab (HTTP/HTTPS); belum untuk traffic Ollama |
 | 6 | Workload Ollama asli lewat HTTPS gateway | E | lintas host Kali → Windows `gemma3:4b` OK 3/3 (2026-09-28) |
 | 7 | Analisis AI / deteksi anomali | – | belum |
@@ -65,8 +65,12 @@ sederhana dengan istilah teknis), `docs/collab-log.md` (log kerja bersama dua se
 7. Keep-alive harus lebih panjang dari delay di **kedua** sisi (uvicorn dan httpx default 5 s).
 8. Pencocokan capture TLS ↔ log: pakai kausalitas + mutual best (sudah di `observer/correlator.py`);
    "waktu terdekat" pernah dua kali menukar pasangan.
-9. Request pertama setelah server restart punya cold start 20–50 ms sebelum middleware (belum dijelaskan).
+9. Request pertama setelah server restart punya cold start 20–50 ms sebelum middleware (belum
+   dijelaskan; terlihat di Windows dan Linux).
 10. `/health` dari generator tidak ditulis ke client log → di capture muncul sebagai exchange tanpa log (normal).
+11. Jam antar host: per 2026-09-28 Kali (NTP, sebelumnya −4.82 s) dan Windows (`pool.ntp.org`,
+    sebelumnya +60–100 ms) sudah disinkron, tetapi lewat Wi-Fi publik ketelitiannya hanya puluhan ms.
+    Jangan menghitung latency dari timestamp dua host; ukur durasi di dalam satu host.
 
 ## Cara bekerja bersama (dua sesi)
 - Koordinasi lewat **git** + **`docs/collab-log.md`**. Mulai setiap sesi dengan `git pull`, baca

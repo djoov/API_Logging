@@ -344,8 +344,35 @@ tersegel; nomor resi ditulis di luar supaya kantor pos bisa mengantar.
 | D | HTTPS + enkripsi payload, server **dengan** kunci | client dan server (`authorized`); balasan juga terenkripsi |
 | – | HTTP + enkripsi payload | pengamat jaringan melihat envelope (`request_id`, `sequence`, `enc=fernet`) tetapi isi hanya ciphertext |
 
-Kunci salah atau ciphertext yang diubah ditolak (HTTP 400, `failed`). Uji lintas host Windows ↔ Kali
-untuk Test C/D **belum dilakukan**.
+Kunci salah atau ciphertext yang diubah ditolak (HTTP 400, `failed`).
+
+**Hasil lintas host (28-09, Windows ↔ Kali, dua arah, 9/9 berhasil):** kunci yang sama
+(`key_id=80dacc3b5d23`) disalin ke Kali lewat **scp**. Observer dan **pcap mentah** (rekaman paket
+TCP utuh, bukan hanya TLS record) berjalan di kedua host.
+
+| Uji | Arah | Hasil | Siapa bisa membaca isi pesan |
+|---|---|---|---|
+| 1 — Test D | Kali → Windows | 3× `authorized` | client Kali dan server Windows |
+| 2 — Test D | Windows → Kali | 3× `authorized`, balasan terenkripsi terbaca | client Windows dan server Kali |
+| 2 — Test C | Windows → Kali | 3× `not_authorized` | hanya client Windows; log dan output server Kali tidak memuat isi pesan sama sekali |
+
+Pcap mentah kedua host: **0 retransmisi, 0 duplicate ACK, 0 reset**, dan hanya **3 koneksi TCP**
+untuk 9 request karena **keep-alive** 10 detik dipasang di kedua sisi.
+
+**Temuan baru:**
+- **Side channel ukuran respons:** request-nya identik (637 B), tetapi respons server pemegang kunci
+  677 B (ada balasan terenkripsi) sedangkan server tanpa kunci 546 B. 📮 Dari tebal amplop balasan
+  saja, penyadap bisa tahu apakah kantor tujuan punya kunci brankas — tanpa membuka amplop.
+- **"Boleh mengangkut" ≠ "boleh membaca":** server Test C tetap melayani API (status 200, logging,
+  korelasi) tanpa pernah melihat isi pesan.
+- **Cold start juga di Linux:** request pertama setelah server Kali dinyalakan ulang ≈ 40 ms,
+  berikutnya 4–8 ms.
+
+**Jam antar host (clock skew):** saat diukur, jam Kali tertinggal **4,82 detik** dari **NTP**
+(*Network Time Protocol*, layanan jam internet) dan jam Windows **60–100 ms lebih cepat**; keduanya
+kemudian disinkronkan. 📮 Dua kantor pos dengan jam dinding berbeda: cap waktu surat dari kantor A dan
+B tidak bisa langsung dibandingkan. Karena itu semua latency di laporan ini diukur **di dalam satu
+host**. Lewat Wi-Fi publik, penyelarasan jam antar host hanya teliti puluhan milidetik.
 
 ---
 
@@ -399,6 +426,11 @@ Total **103 unit test** lulus (per 28-09). Semua bug observer (#8, #10–#13) pu
    menghasilkan error apa pun; baru ketahuan dari pengukuran.
 6. **Ukur dulu sebelum menyimpulkan.** Dua dugaan awal terbukti keliru oleh data: bahwa jeda 40 ms
    hanya karena session ticket, dan bahwa timestamp capture di Kali salah.
+7. **Enkripsi payload memisahkan jalur data dari hak baca.** Observability tetap berjalan (status,
+   waktu, korelasi `request_id`) di host yang tidak memegang kunci; hanya titik dekripsi yang sah yang
+   melihat isi. Tetapi ukuran pesan tetap membocorkan informasi, di setiap lapisan enkripsi yang diuji.
+8. **Jam antar host harus diukur, bukan diasumsikan.** Selisih 4,8 detik antara jam Kali dan Windows
+   baru ketahuan saat timestamp dua host dibandingkan.
 
 ---
 
@@ -407,9 +439,12 @@ Total **103 unit test** lulus (per 28-09). Semua bug observer (#8, #10–#13) pu
 1. **Perbandingan ulang HTTP vs HTTPS secara adil.** Fase 1 dan Fase 2 diukur dengan pengaturan
    Run A (Nagle aktif, handshake per request), sehingga selisihnya bercampur efek lain. Perlu diulang
    dengan pengaturan Run D di kedua arah.
-2. **Mencari penyebab cold start** pada request pertama setelah server di-restart.
-3. **Fase 3 & 4 lintas host:** Test C dan D antara Windows dan Kali (kunci Fernet disalin lewat scp).
+2. **Mencari penyebab cold start** pada request pertama setelah server di-restart (terlihat di
+   Windows dan Linux).
+3. **Enkripsi payload untuk traffic Ollama** (Fase 3/4 digabung dengan Fase 6).
 4. **Fase 5 untuk Ollama:** korelasi dua arah pada traffic LLM (saat ini Ollama hanya di Windows).
 5. **Fase 7 — analisis AI / deteksi anomali** di atas event JSONL, dan **Fase 8 — eBPF**.
-6. **Anomali 80 ms** pada satu request Test E (terjadi di sisi Kali sebelum request tiba di Windows).
+6. **Anomali ~76 ms** pada satu request Test E: gateway mengirim ServerHello dalam 1,8 ms, tetapi
+   paket itu baru sampai di Kali ~76 ms kemudian (jalur VirtualBox Host-Only / VM). Tidak terulang di
+   uji Fase 3/4 yang direkam dengan pcap mentah, jadi penyebab pastinya belum diketahui.
 7. **Keputusan soal unreachable commit** yang masih memuat co-author Claude di GitHub.
