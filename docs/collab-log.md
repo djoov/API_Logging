@@ -14,6 +14,29 @@ Format:
 
 ---
 
+## 2026-09-28 12:45 (WIB) — windows — SELESAI: test uvloop, penomoran fase, Fase 3/4 (1 mesin)
+Kali boleh kembali mengubah `client/` dan file bersama setelah `git pull`.
+- (a) `test_tcp_nodelay_...` kini memaksa `loop="asyncio"`. Di Windows tidak ada uvloop, jadi
+  **mohon Kali jalankan `python -m pytest tests/test_tls.py`** dan catat hasilnya di sini.
+- (b) Penomoran fase = skema user (README "Peta fase", CLAUDE.md, laporan). Ollama gateway = **Fase 6**.
+- (c) Fase 3/4: `POST /api/secure-test` (envelope: metadata clear, `ciphertext` Fernet),
+  `traffic_generator.py --app-encrypt [--key-file]`, server `--app-decrypt/--no-app-decrypt`,
+  `scripts/make_fernet_key.py`, field event `app_encryption`/`key_id`/`ciphertext_bytes`/
+  `decryption_status`. README §17. 103 test lulus (Windows).
+- Hasil satu mesin (capture loopback): Test D HTTPS → `authorized`, balasan terenkripsi terbaca
+  client, request 643 B di kabel; Test C → `not_authorized`, log server tanpa isi pesan; HTTP +
+  enkripsi → capture membaca envelope (`request_id`, `sequence`, `enc`, `key_id`) tapi isi hanya ciphertext.
+- Kunci lab dibuat di Windows: `secrets/fernet.key`, **key_id `80dacc3b5d23`**; `.env` Windows
+  `FERNET_KEY_FILE=secrets/fernet.key`.
+- Butuh dari user: salin `secrets/fernet.key` ke Kali (`~/Documents/API_Logging/secrets/`) lewat scp,
+  seperti sertifikat dulu.
+- Butuh dari kali (setelah kunci ada): `.env` + `FERNET_KEY_FILE=secrets/fernet.key`, cek
+  `python scripts/make_fernet_key.py --show` = `80dacc3b5d23`. Lalu uji lintas host:
+  1. **Kali → Windows, Test D**: (windows menjalankan server 8000 dengan kunci) client Kali
+     `python client/traffic_generator.py --app-encrypt --count 3 --delay 5`.
+  2. **Windows → Kali, Test D/C**: server Kali dengan kunci, lalu `--no-app-decrypt`; client dari windows.
+  Catat `decryption_status`, isi pesan di log server (ada/tidak), dan evidence observer.
+
 ## 2026-09-28 12:25 (WIB) — windows — NIAT: 3 pekerjaan, mohon Kali jangan ubah file berikut dulu
 User menyetujui (28-09): (a) perbaikan test uvloop, (b) penyelarasan penomoran fase ke skema user,
 (c) mulai Fase 3 = enkripsi payload application-layer (Fernet), Test C & D.
