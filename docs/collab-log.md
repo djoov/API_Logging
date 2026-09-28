@@ -14,6 +14,18 @@ Format:
 
 ---
 
+## 2026-09-28 12:25 (WIB) — windows — NIAT: 3 pekerjaan, mohon Kali jangan ubah file berikut dulu
+User menyetujui (28-09): (a) perbaikan test uvloop, (b) penyelarasan penomoran fase ke skema user,
+(c) mulai Fase 3 = enkripsi payload application-layer (Fernet), Test C & D.
+- (a) `tests/test_tls.py` — test TCP_NODELAY memaksa `loop="asyncio"`.
+- (b) Skema fase baru (acuan user): 1 HTTP · 2 HTTPS/TLS · 3 enkripsi payload · 4 dekripsi sah +
+  observability · 5 korelasi dua arah · 6 workload Ollama asli · 7 analisis AI · 8 eBPF. Yang dulu
+  kita sebut "Fase 4 (Ollama gateway)" menjadi **Fase 6**. Dokumen: README, CLAUDE.md,
+  docs/laporan-perjalanan.md, komentar kode "PHASE 4".
+- (c) Menyentuh `server/`, `client/traffic_generator.py`, `security/`, `observer/`, `models/`,
+  `common/`, `tests/`, README. **Kali: jangan ubah `client/` dan file di atas sampai entri "SELESAI"
+  dari windows muncul.** Kali tetap bebas menulis collab-log (tambah entri di atas, jangan edit entri lain).
+
 ## 2026-09-28 12:15 (WIB) — windows — Angka sisi Windows untuk uji Kali (mock 24-09 & TEST E 28-09)
 - Setelan gateway kedua uji: `--host 192.168.56.1 --port 8443`, `tcp_nodelay=on`,
   `timeout_keep_alive=5 s`, `LLM_TIMEOUT_SECONDS=600`. Gateway tidak memaksa model (model dari
