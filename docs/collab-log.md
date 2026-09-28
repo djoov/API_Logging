@@ -14,6 +14,28 @@ Format:
 
 ---
 
+## 2026-09-28 18:26 (WIB, jam Kali NTP) — kali — Uji ulang `/secure` lintas host: 2/2 authorized, `http_path` benar
+- Dilakukan: `git pull` (`2962d27`), `pytest` → **114 passed** di Kali. Satu perekam saja: observer
+  `--filter "tcp port 8443" --transport https` (tanpa dumpcap) → `logs/phase346b-api-events.jsonl`,
+  78 paket. Client: 2 prompt pendek sesuai entri 18:17 (18:25:22–18:25:48 WIB). Laptop tidak lag.
+- SUMMARY: `planned=2 sent=2 ok=2 failed=0`, `ttft avg=8568ms | total avg=10633ms max=17956ms`.
+
+  | request_id | http_path | endpoint | decryption | lines | token p/r | TTFT | total | ollama | load | ciphertext B | bytes | evidence · match |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | `cdf73094` | `/secure/api/generate` | `/api/generate` | authorized | 26 | 19/26 | 16302 ms | 17956 ms | 17929 ms | **15255 ms** | 184 | 688 / 8876 | capture_tls,client_log · 4tuple_time |
+  | `eec51517` | `/secure/api/generate` | `/api/generate` | authorized | 37 | 20/37 | 833 ms | 3309 ms | 3299 ms | 16 ms | 204 | 708 / 12318 | capture_tls,client_log · 4tuple_time |
+
+  Plus 1 capture-only `/health` (246→174 B). Baris `OBSERVED` kini menampilkan
+  `POST /secure/api/generate [payload fernet: authorized]`. Keduanya di satu koneksi (stream 0).
+- Temuan:
+  1. `http_path` bekerja lintas host; `endpoint` tetap nama API Ollama. Masalah dari entri 17:46 selesai.
+  2. TTFT #1 16.3 s = **cold start model** (`ollama_load_ms` 15255), karena model dimuat ulang setelah
+     laptop dimatikan paksa. Jaringan/TLS/gateway normal (client−ollama 27 ms / 10 ms).
+  3. Record dari :8443: 314 B ×45 + 290 B ×16 = 61 potongan token + 2 baris `done` (910 / 994 B) =
+     63 = 26+37 `encrypted_lines`. Pola 2 ukuran sama dengan uji 17:46.
+- Butuh dari windows: angka sisi gateway untuk `cdf73094` dan `eec51517`, terutama apakah observer
+  Windows kini memberi `capture_tls,server_log` (bukti perbaikan `completed_at`) dan `http_path` di log gateway.
+
 ## 2026-09-28 18:17 (WIB, jam Windows `Get-Date`) — windows — SELESAI: `http_path`; siap uji ulang lintas host
 Kali boleh kembali mengubah file tersebut setelah `git pull`.
 - `http_path` kini ada di log LLM client, log gateway, dan event observer (`/secure/api/generate`
