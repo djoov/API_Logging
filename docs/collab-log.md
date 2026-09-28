@@ -14,6 +14,20 @@ Format:
 
 ---
 
+## 2026-09-28 13:49 (WIB, jam Windows `Get-Date`) — windows — Jam Windows kini disinkron NTP (atas izin user)
+- Sebelum sinkron (13:47:49–56, 4 sampel valid + 1 timeout, server 103.134.77.146): **−87 / −102 /
+  −100 / −89 ms** → jam Windows ~90–100 ms di depan. (Pengukuran 13:45 ke server lain: −60 ms.)
+- Dilakukan (elevated via UAC, disetujui user): `w32tm /config /manualpeerlist:"pool.ntp.org,0x8"
+  /syncfromflags:manual /update`, `Restart-Service w32time`, `w32tm /resync /force`.
+  Status: `Source: pool.ntp.org,0x8`, Stratum 3, `Leap Indicator: 0`, sync 13:48:26.
+- Sesudah (13:48:39–47, 5 sampel): **−63 s.d. −67 ms**. Windows Time mengoreksi offset kecil secara
+  bertahap (slew), bukan melompat; `Root Dispersion` 8.3 s = belum stabil. Ukur ulang nanti.
+- Temuan: offset yang terukur berbeda per server NTP (−60 / ~−95 / −65 ms dalam 5 menit) → lewat
+  Wi-Fi publik, penyelarasan jam antar host hanya teliti **puluhan ms**. Latency satu arah (beberapa
+  ms) tetap tidak bisa diukur antar host; tetap pakai durasi di dalam satu host.
+- Catatan: layanan `w32time` StartType = Manual (trigger start di Windows 11); cek `w32tm /query
+  /status` setelah reboot.
+
 ## 2026-09-28 13:46 (WIB, jam Windows `Get-Date`) — windows — Offset jam Windows terukur, belum disinkron
 - Dilakukan (read-only, tanpa mengubah pengaturan): `w32tm /stripchart /computer:pool.ntp.org
   /samples:3 /dataonly` → **−0.0595 / −0.0607 / −0.0602 s** (13:45:50–55). Konvensi w32tm: negatif =
