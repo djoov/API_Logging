@@ -14,6 +14,41 @@ Format:
 
 ---
 
+## 2026-09-28 13:37 (WIB, jam Kali `date`) — kali — Fase 3/4 lintas host sisi Kali: C/D terbukti di log server Kali
+- Setelan Kali: Uji 1 client `traffic_generator.py --app-encrypt --count 3 --delay 5 --keep-alive 10`;
+  Uji 2 server `api_server.py --tcp-nodelay --keep-alive 10` (log: `AUTHORIZED key_id=80dacc3b5d23
+  (Test D)`), lalu `--no-app-decrypt` (log: `decryption: none - encrypted payloads are accepted
+  unread (Test C)`). Observer eth1 `tcp port 8000 --transport https` → 12 event; pcap mentah
+  `logs/phase34-kali.pcap` (dumpcap, 105 paket, 0 drop; tidak di-commit).
+- Uji 1 SUMMARY client: `planned=3 sent=3 ok=3 failed=0`, `client_rtt min=5.6ms avg=11.3ms max=20.3ms
+  | server_processing avg=6.4ms`, semua `decryption=authorized`.
+
+  | Uji | request_id | decryption_status | `payload.message` di **log server Kali** | key_id | ciphertext_bytes | resp B | evidence (observer Kali) |
+  |---|---|---|---|---|---|---|---|
+  | 1 D (Kali client) | `77a0cbb0` `5c11c299` `c0baf1ea` | authorized | – (server Windows) | 80dacc3b5d23 | 140 | 683/683/685 | capture_tls,client_log · 4tuple_time |
+  | 2 D (Kali server) | `408464ca` `02e38823` `2ac810b4` | authorized | **"hello from windows #1/#2/#3"** | 80dacc3b5d23 | 140 | 677 | capture_tls,server_log · 4tuple_time |
+  | 2 C (Kali server) | `36995e4e` `a77adb90` `476527e1` | not_authorized | **null**; string "hello from windows" tidak ada di mana pun di record | 80dacc3b5d23 | 140 | 546 | capture_tls,server_log · 4tuple_time |
+
+  Stdout server (`phase34-server-D.out`/`-C.out`) juga tidak memuat isi pesan (0 kemunculan).
+  Latensi di server Kali (`wire_server_side`): D 3.7–5.6 ms, C 4.6–8.4 ms.
+- pcap mentah Kali: **0 retransmisi, 0 fast retransmission, 0 dup ACK, 0 lost segment, 0 RST,
+  0 zero window**. 3 koneksi, sama dengan Windows:
+
+  | stream | client | SYN→SYN/ACK | SYN/ACK→ACK | ClientHello→ServerHello (di NIC Kali) |
+  |---|---|---|---|---|
+  | 0 (Uji 1) | Kali :38466 | 1.21 ms | 0.02 ms | 2.15 ms |
+  | 1 (Uji 2 D) | Windows :53009 | 0.15 ms | 0.59 ms | 0.94 ms |
+  | 2 (Uji 2 C) | Windows :64316 | 0.10 ms | 0.74 ms | 1.23 ms |
+
+  Jeda ~76 ms tidak muncul, sama dengan temuan Windows.
+- Temuan:
+  1. **Mode dekripsi server bocor lewat ukuran respons.** Envelope request sama (637 B, ciphertext
+     140 B), tetapi respons Test D (balasan terenkripsi) = 677 B vs Test C = 546 B (−131 B).
+     Penyadap TLS bisa membedakan server yang memegang kunci dari yang tidak, tanpa dekripsi apa pun.
+  2. `/health` pertama setelah **setiap** restart server Kali = 40.4 / 40.5 ms (berikutnya 3.7–8.4
+     ms). Ini jebakan #9 (cold start ~20–50 ms), sekarang terlihat juga di Linux.
+- Kondisi: jam Kali tetap tidak disinkron (keputusan user). Tidak ada kode yang diubah.
+
 ## 2026-09-28 13:32 (WIB, jam Windows `Get-Date`) — windows — Fase 3/4 lintas host: 9/9 sesuai harapan
 - Setelan Windows: `server/api_server.py --tcp-nodelay --keep-alive 10`, `FERNET_KEY_FILE`
   (AUTHORIZED key_id `80dacc3b5d23`); observer Ethernet 2 `tcp port 8000 --transport https`;
