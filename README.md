@@ -968,3 +968,10 @@ bila port mock (11434) sudah terpakai — kini skrip menolak; pakai `-MockPort 1
 
 Catatan: `endpoint` di log dan event berisi endpoint Ollama (`/api/generate`), bukan path HTTP
 `/secure/api/generate`; status enkripsi dibedakan lewat `app_encryption`/`decryption_status`.
+
+**Melihat bukti enkripsi/dekripsi per host:** `python scripts/show_evidence.py <folder-log>` (Kali:
+`python3`, tambah `--events <file>` bila observer memakai `--output`). Per request ditampilkan: lapisan
+TLS dan payload, apakah host ini mendekripsi (`authorized`), balasan dikirim/diterima terenkripsi
+(`reply_encrypted_lines` / `encrypted_lines`, `reply_decryption_status`), sidik jari sertifikat server,
+evidence observer — dan pemeriksaan apakah teks prompt/jawaban yang tercatat pernah muncul di capture
+(di Fase 1 HTTP: YES; dengan HTTPS/`/secure`: NO).
