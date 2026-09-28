@@ -14,6 +14,41 @@ Format:
 
 ---
 
+## 2026-09-28 11:55 (WIB) — kali — TEST E: Kali → gateway HTTPS → Ollama asli (gemma3:4b), 3/3 OK
+- Dilakukan: gateway `https://192.168.56.1:8443` sekarang meneruskan ke Ollama asli
+  (`/api/version` = 0.34.4, `/api/tags` = `gemma3:4b` 4.3B Q4_K_M). Port 11434 tetap tertutup dari
+  Kali ✔. Observer `--filter "tcp port 8443" --output logs/phase4-real-api-events.jsonl`, lalu
+  `llm_client.py --model gemma3:4b --count 3 --delay 7 --keep-alive 10` dengan 3 prompt pendek
+  (11:53:52–11:54:33 WIB). `.env` Kali tidak diubah (`LLM_MODEL` masih `mock-llm`; model lewat `--model`).
+- Hasil client: `SUMMARY planned=3 sent=3 ok=3 failed=0`, `ttft avg=1176ms | total avg=9004ms max=13276ms`.
+- Hasil observer Kali: 4 event, 311 paket. 3× `POST /api/generate` 200 dengan
+  `evidence=capture_tls,client_log` dan `capture_match=4tuple_time`, plus 1 capture-only `/health`.
+
+  | request_id | stream | client_total | ollama_total | load | prompt_eval | eval | client−ollama | TTFT | token p/r | bytes req/resp |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | `5627f2bd` | 0 | 5001 ms | 4981 ms | 15 ms | 930 ms | 3998 ms | **20 ms** | 1006 ms | 19/53 | 410/7273 |
+  | `f70ef466` | 1 | 8736 ms | 8725 ms | 3 ms | 1068 ms | 7643 ms | **12 ms** | 1093 ms | 21/93 | 408/12298 |
+  | `36a2ae3e` | 2 | 13276 ms | 13188 ms | 5 ms | 1326 ms | 11845 ms | **88 ms** | 1430 ms | 30/137 | 444/17878 |
+- Temuan:
+  1. Latensi hampir seluruhnya berasal dari Ollama. Selisih client_total − ollama_total (jaringan +
+     TLS + gateway) hanya 12–88 ms, kurang dari 1 %. Model sudah warm (load 3–15 ms). TTFT ≈
+     prompt_eval + 25–104 ms. `wire_ttfb` (1003/1087/1348 ms) ≈ TTFT, karena header gateway baru
+     lewat saat Ollama mulai merespons.
+  2. Token-length side channel dengan model asli: 283 TLS record berukuran 116–128 B = 53+93+137
+     `response_tokens`, persis. Berbeda dengan mock (125–135 B seragam), ukuran record bervariasi
+     ±12 B mengikuti panjang teks token. Record terakhir (statistik + `context`) = 732 / 979 / 1266 B,
+     tumbuh ~5.6 B per token (prompt+jawaban). Tanpa dekripsi, penyadap bisa memperkirakan jumlah
+     token dan panjang per-token.
+  3. Keep-alive gateway 5 s < delay 7 s, jadi tiap request memakai koneksi TLS baru (stream 0/1/2,
+     close_notify 19 B dari gateway ~5 s setelah jawaban). Tidak ada error. Konsisten dengan jebakan #7.
+  4. Commit `ec1b625` (entri 21:46) **belum ter-push**: Kali belum punya kredensial GitHub (tidak ada
+     `gh`/SSH key). Menunggu user.
+- Niat (dokumen): setelah angka sisi Windows masuk, tambah README §18.7 "Hasil Ollama asli lintas
+  host". Belum diubah.
+- Butuh dari windows: untuk 3 request_id di atas: `gateway_ttft_ms`, `gateway_total_ms`, jumlah
+  event + evidence/capture_match observer Windows, dan setelan gateway (`timeout_keep_alive`, model
+  default) saat uji ini.
+
 ## 2026-09-24 21:46 (WIB) — kali — Uji lintas host Fase 4: 3/3 OK, prompt+jawaban tercatat di Kali
 - Dilakukan: `git pull` (`3d562fb`); `.env` Kali + `LLM_TARGET_URL`, `LLM_MODEL=mock-llm`,
   `OBSERVER_TLS_IDLE_SECONDS=30`, `OBSERVER_INCOMPLETE_TIMEOUT_SECONDS=900`. Observer
