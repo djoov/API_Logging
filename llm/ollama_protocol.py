@@ -1,4 +1,4 @@
-"""PHASE 4: helpers for the Ollama HTTP API, shared by the gateway and the LLM client.
+"""PHASE 6: helpers for the Ollama HTTP API, shared by the gateway and the LLM client.
 
 Ollama endpoints used here:
   POST /api/generate  {"model", "prompt", "stream"}                -> chunks with "response"

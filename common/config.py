@@ -109,10 +109,11 @@ class Settings:
     tls_cert_file: Path | None  # server certificate (enables HTTPS on the server)
     tls_key_file: Path | None
     tls_ca_file: Path | None  # CA the client trusts when TARGET_SCHEME=https
+    fernet_key_file: Path | None  # Phase 3/4: shared payload key (absent = cannot encrypt/decrypt)
     server_tcp_nodelay: bool  # disable Nagle on accepted connections (experiment switch)
     server_keep_alive: int  # seconds an idle keep-alive connection stays open (uvicorn default 5)
     client_keep_alive: float  # seconds the traffic generator keeps an idle connection (httpx default 5)
-    # Phase 4: Ollama over an HTTPS gateway
+    # Phase 6: Ollama over an HTTPS gateway
     ollama_url: str  # where the gateway forwards to; keep it on 127.0.0.1
     gateway_host: str
     gateway_port: int
@@ -170,6 +171,7 @@ def load_settings() -> Settings:
         tls_cert_file=_get_path("TLS_CERT_FILE"),
         tls_key_file=_get_path("TLS_KEY_FILE"),
         tls_ca_file=_get_path("TLS_CA_FILE"),
+        fernet_key_file=_get_path("FERNET_KEY_FILE"),
         server_tcp_nodelay=_get_bool("SERVER_TCP_NODELAY", False),
         server_keep_alive=_get_int("SERVER_KEEP_ALIVE_SECONDS", 5),
         client_keep_alive=_get_float("CLIENT_KEEP_ALIVE_SECONDS", 5.0),

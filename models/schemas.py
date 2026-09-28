@@ -63,6 +63,45 @@ class ApiTestResponse(BaseModel):
     processing_time_ms: float = Field(ge=0)
 
 
+class SecureTestRequest(BaseModel):
+    """Phase 3 envelope for POST /api/secure-test.
+
+    Routing/correlation metadata stays in plaintext (so observers can still correlate and count);
+    the business payload {"message": ...} is only inside the Fernet ciphertext.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    sender: str = Field(pattern=NODE_NAME_PATTERN)
+    sequence: int = Field(ge=1)
+    sent_at: AwareDatetime
+    enc: Literal["fernet"]
+    key_id: str = Field(min_length=1, max_length=32)
+    ciphertext: str = Field(min_length=1, max_length=65536)
+
+    @field_validator("request_id")
+    @classmethod
+    def _check_request_id(cls, value: str) -> str:
+        return normalize_request_id(value)
+
+
+class SecureTestResponse(BaseModel):
+    status: Literal["ok"]
+    message: str
+    receiver: str
+    request_id: str
+    sequence: int
+    received_at: AwareDatetime
+    processing_time_ms: float = Field(ge=0)
+    # "authorized": this server holds the key and decrypted the payload (Test D).
+    # "not_authorized": no key here; payload accepted but never read (Test C).
+    decryption_status: Literal["authorized", "not_authorized"]
+    enc: Literal["fernet"] | None = None
+    key_id: str | None = None
+    ciphertext: str | None = None  # encrypted reply, only when the server could decrypt
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok"]
 
@@ -117,7 +156,14 @@ class ApiExchangeEvent(BaseModel):
     # How wire evidence was tied to this exchange: "request_id" (plaintext header),
     # "4tuple_time" (TLS: same connection + close in time), or None (no capture / unmatched).
     capture_match: str | None = None
-    # Phase 4 (Ollama): model, full prompt and answer, time to first token, token statistics.
+    # Phase 3/4: application-layer encryption of the payload and who could read it.
+    app_encryption: str | None = None  # "fernet" when the payload was encrypted by the application
+    key_id: str | None = None  # key fingerprint (never the key)
+    ciphertext_bytes: int | None = None
+    # "authorized" (key holder decrypted), "not_authorized" (no key, payload unread),
+    # "failed" (wrong key / tampered), None (payload not encrypted)
+    decryption_status: str | None = None
+    # Phase 6 (Ollama): model, full prompt and answer, time to first token, token statistics.
     # Filled only from the app logs of the LLM client / gateway, never from encrypted capture.
     llm: dict[str, Any] | None = None
 

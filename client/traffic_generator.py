@@ -29,12 +29,15 @@ from models.schemas import (
     NODE_NAME_PATTERN,
     ApiTestRequest,
     ApiTestResponse,
+    SecureTestResponse,
     new_request_id,
 )
+from security.payload_crypto import ALGORITHM, PayloadCryptoError, decrypt_payload, encrypt_payload, key_id, load_key
 
 log = get_logger("client")
 
 ENDPOINT = "/api/test"
+SECURE_ENDPOINT = "/api/secure-test"  # Phase 3/4: payload encrypted by the application
 MAX_COUNT = 1000  # safety cap: this tool is for controlled experiments, not load testing
 
 
@@ -54,6 +57,13 @@ class SendResult:
     payload: dict[str, Any] = field(default_factory=dict)
     tls_version: str | None = None  # e.g. "TLSv1.3"; None for plain HTTP
     tls_cipher: str | None = None
+    endpoint: str = ENDPOINT
+    # Phase 3/4
+    app_encryption: str | None = None
+    key_id: str | None = None
+    ciphertext_bytes: int | None = None
+    decryption_status: str | None = None  # as reported by the server
+    reply_plaintext: dict[str, Any] | None = None  # server's encrypted reply, decrypted here
 
     @property
     def ok(self) -> bool:
@@ -118,26 +128,48 @@ def _explain_connect_error(exc: Exception) -> str:
     return f"connection failed: {text}"
 
 
+def build_secure_body(payload: ApiTestRequest, app_key: bytes) -> dict[str, Any]:
+    """Phase 3 envelope: routing metadata in clear, the message only inside the ciphertext."""
+    return {
+        "request_id": payload.request_id,
+        "sender": payload.sender,
+        "sequence": payload.sequence,
+        "sent_at": to_iso(payload.sent_at),
+        "enc": ALGORITHM,
+        "key_id": key_id(app_key),
+        "ciphertext": encrypt_payload({"message": payload.message}, app_key),
+    }
+
+
 def send_one(
     client: httpx.Client,
     base_url: str,
     payload: ApiTestRequest,
     retries: int,
     retry_backoff: float,
+    app_key: bytes | None = None,
 ) -> SendResult:
     """POST one payload. Retries on connection errors/timeouts and 5xx, never on 4xx.
 
     Every retry reuses the same request_id: it identifies the logical request, not the attempt.
+    With app_key the message is Fernet-encrypted and sent to /api/secure-test (Phase 3/4).
     """
-    url = base_url.rstrip("/") + ENDPOINT
+    endpoint = SECURE_ENDPOINT if app_key else ENDPOINT
+    url = base_url.rstrip("/") + endpoint
     result = SendResult(
         sequence=payload.sequence,
         request_id=payload.request_id,
         sent_at=to_iso(payload.sent_at),
         payload={"message": payload.message, "sender": payload.sender, "sequence": payload.sequence},
+        endpoint=endpoint,
     )
     headers = {HEADER_REQUEST_ID: payload.request_id, HEADER_SENDER: payload.sender}
-    body = payload.model_dump(mode="json")
+    if app_key:
+        body = build_secure_body(payload, app_key)
+        result.app_encryption, result.key_id = ALGORITHM, body["key_id"]
+        result.ciphertext_bytes = len(body["ciphertext"])
+    else:
+        body = payload.model_dump(mode="json")
 
     for attempt in range(1, retries + 2):
         result.attempts = attempt
@@ -159,11 +191,19 @@ def send_one(
             result.tls_version, result.tls_cipher = _tls_info(response)
             if response.is_success:
                 try:
-                    parsed = ApiTestResponse.model_validate(response.json())
-                    result.server_processing_ms = parsed.processing_time_ms
-                    result.receiver = parsed.receiver
+                    if app_key:
+                        secure = SecureTestResponse.model_validate(response.json())
+                        result.decryption_status = secure.decryption_status
+                        if secure.ciphertext:
+                            result.reply_plaintext = decrypt_payload(secure.ciphertext, app_key)
+                        parsed_ms, parsed_receiver = secure.processing_time_ms, secure.receiver
+                    else:
+                        parsed = ApiTestResponse.model_validate(response.json())
+                        parsed_ms, parsed_receiver = parsed.processing_time_ms, parsed.receiver
+                    result.server_processing_ms = parsed_ms
+                    result.receiver = parsed_receiver
                     result.error = None
-                except ValueError as exc:
+                except (ValueError, PayloadCryptoError) as exc:
                     result.error = f"invalid response body: {exc}"
                 return result
             result.error = f"HTTP {response.status_code}: {response.text[:200]}"
@@ -188,8 +228,13 @@ def _record_for_log(result: SendResult, sender: str, base_url: str) -> dict[str,
         "completed_at": to_iso(utc_now()),
         "target": base_url,
         "method": "POST",
-        "endpoint": ENDPOINT,
+        "endpoint": result.endpoint,
         "transport": "https" if base_url.startswith("https://") else "http",
+        "app_encryption": result.app_encryption,
+        "key_id": result.key_id,
+        "ciphertext_bytes": result.ciphertext_bytes,
+        "decryption_status": result.decryption_status,
+        "reply_plaintext": result.reply_plaintext,
         "tls_version": result.tls_version,
         "tls_cipher": result.tls_cipher,
         "source_ip": local[0],
@@ -247,6 +292,10 @@ def parse_args(settings: Settings, argv: list[str] | None = None) -> argparse.Na
     parser.add_argument("--keep-alive", type=float, default=settings.client_keep_alive,
                         help="seconds an idle connection is kept for reuse (default: CLIENT_KEEP_ALIVE_SECONDS, "
                              "5 = httpx default). With --delay >= this value every request opens a new connection")
+    parser.add_argument("--app-encrypt", action="store_true",
+                        help="Phase 3: encrypt the message with the Fernet key and use /api/secure-test")
+    parser.add_argument("--key-file", type=Path, default=settings.fernet_key_file,
+                        help="Fernet key for --app-encrypt (default: FERNET_KEY_FILE)")
     parser.add_argument("--ca-file", type=Path, default=settings.tls_ca_file,
                         help="CA certificate to trust for https targets (default: TLS_CA_FILE)")
     args = parser.parse_args(argv)
@@ -286,6 +335,15 @@ def run(args: argparse.Namespace) -> int:
         log.error("CONFIG ERROR %s", exc)
         return 2
 
+    app_key: bytes | None = None
+    if args.app_encrypt:
+        try:
+            app_key = load_key(args.key_file)
+        except PayloadCryptoError as exc:
+            log.error("CONFIG ERROR %s (create one with scripts/make_fernet_key.py)", exc)
+            return 2
+        log.info("CLIENT app-layer encryption: fernet key_id=%s -> %s", key_id(app_key), SECURE_ENDPOINT)
+
     results: list[SendResult] = []
     limits = httpx.Limits(keepalive_expiry=args.keep_alive)
     with httpx.Client(timeout=args.timeout, verify=verify, limits=limits) as client:
@@ -294,13 +352,15 @@ def run(args: argparse.Namespace) -> int:
         try:
             for seq in range(1, args.count + 1):
                 payload = build_payload(args.sender, seq, args.message)
-                result = send_one(client, args.target, payload, args.retries, args.retry_backoff)
+                result = send_one(client, args.target, payload, args.retries, args.retry_backoff, app_key)
                 results.append(result)
                 append_jsonl(args.log_file, _record_for_log(result, args.sender, args.target))
                 if result.ok:
-                    log.info("RESPONSE #%d status=%s latency=%.1fms server_processing=%.1fms receiver=%s",
+                    log.info("RESPONSE #%d status=%s latency=%.1fms server_processing=%.1fms receiver=%s%s",
                              seq, result.status_code, result.client_rtt_ms, result.server_processing_ms or 0,
-                             result.receiver)
+                             result.receiver,
+                             f" decryption={result.decryption_status} reply={result.reply_plaintext}"
+                             if app_key else "")
                 else:
                     log.error("FAILED #%d request_id=%s status=%s error=%s",
                               seq, result.request_id, result.status_code, result.error)

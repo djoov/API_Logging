@@ -1,4 +1,4 @@
-"""Phase 4 tests: Ollama protocol parsing, HTTPS gateway + mock Ollama + LLM client end to end."""
+"""Phase 6 tests: Ollama protocol parsing, HTTPS gateway + mock Ollama + LLM client end to end."""
 from __future__ import annotations
 
 import json

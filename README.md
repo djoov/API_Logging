@@ -1,11 +1,25 @@
-# API Observability Lab — POC 1 (HTTP plaintext, dua arah)
+# API Observability Lab — dua arah, HTTP → HTTPS → payload terenkripsi → Ollama
 
 Eksperimen terkontrol untuk mengamati komunikasi API dua arah antara **Windows (host)** dan
 **Kali Linux (VM)**: request masuk/keluar, source/destination, endpoint, method, status code,
-payload, latency, timestamp, correlation ID (`request_id`), dan arah traffic.
+payload, latency, timestamp, correlation ID (`request_id`), dan arah traffic. Fokusnya **API
+observability**, bukan monitoring CPU/GPU/RAM.
 
 > Lingkup: lab milik sendiri, traffic dengan delay terkontrol. Tidak ada cracking, bypass, atau
-> breaking encryption. Fase 2 (HTTPS/TLS) sudah tersedia (§15); Fase 3 (Fernet) baru disiapkan.
+> breaking encryption; dekripsi hanya oleh pihak yang memegang kunci secara sah.
+
+### Peta fase (acuan penomoran)
+
+| Fase | Isi | Test | Status | Bagian |
+|---|---|---|---|---|
+| 1 | HTTP plaintext | A | selesai, dua arah | §6–§9 |
+| 2 | HTTPS/TLS | B | selesai, dua arah (+ eksperimen transport §16) | §15 |
+| 3 | Enkripsi payload application-layer (Fernet) | C | diuji 1 mesin; lintas host belum | §17 |
+| 4 | Dekripsi sah + observability | D | diuji 1 mesin; lintas host belum | §17 |
+| 5 | Korelasi dua arah | F | selesai untuk API lab; belum untuk traffic Ollama | §9, §16 |
+| 6 | Workload Ollama asli lewat HTTPS gateway | E | lintas host Kali → Windows OK | §18 |
+| 7 | Analisis AI / deteksi anomali | – | belum | – |
+| 8 | eBPF / telemetri jaringan lebih dalam | – | belum | – |
 
 ---
 
@@ -26,8 +40,8 @@ payload, latency, timestamp, correlation ID (`request_id`), dan arah traffic.
 14. [Keterbatasan POC](#14-keterbatasan-poc)
 15. [Fase 2: HTTPS/TLS](#15-fase-2-httpstls)
 16. [Eksperimen transport (Run A–D)](#16-eksperimen-transport-jeda-40-ms-dan-koneksi-baru-per-request)
-17. [Roadmap application-layer encryption](#17-roadmap-fase-3-application-layer-encryption-fernet)
-18. [Fase 4: Ollama lewat HTTPS gateway](#18-fase-4-ollama-lewat-https-gateway-prompt--jawaban-di-kedua-host)
+17. [Fase 3 & 4: enkripsi payload + dekripsi sah](#17-fase-3--4-enkripsi-payload-fernet--dekripsi-sah)
+18. [Fase 6: Ollama lewat HTTPS gateway](#18-fase-6-ollama-lewat-https-gateway-prompt--jawaban-di-kedua-host)
 
 Cerita lengkap proyek ini — tahap, masalah, dan solusinya, dengan istilah teknis yang dijelaskan
 dalam bahasa sederhana: [`docs/laporan-perjalanan.md`](docs/laporan-perjalanan.md).
@@ -76,18 +90,18 @@ api-observability-lab/
 ├── models/schemas.py           # skema Pydantic request/response/event
 ├── server/api_server.py        # FastAPI: GET /health, POST /api/test
 ├── client/traffic_generator.py # generator traffic dengan count + delay
-├── client/llm_client.py        # FASE 4: kirim prompt ke Ollama lewat gateway
+├── client/llm_client.py        # FASE 6: kirim prompt ke Ollama lewat gateway
 ├── observer/
 │   ├── observer.py             # entry point observer
 │   ├── capture_backend.py      # abstraksi TShark / tcpdump (HTTP + TLS)
 │   ├── tls_flows.py            # FASE 2: rekonstruksi exchange dari record TLS terenkripsi
 │   └── correlator.py           # penggabungan bukti per request_id / 4-tuple
-├── gateway/ollama_gateway.py   # FASE 4: HTTPS gateway di depan Ollama (log prompt & jawaban)
-├── llm/ollama_protocol.py      # FASE 4: membaca format streaming Ollama
-├── tools/mock_ollama.py        # FASE 4: pengganti Ollama untuk lab tanpa model
+├── gateway/ollama_gateway.py   # FASE 6: HTTPS gateway di depan Ollama (log prompt & jawaban)
+├── llm/ollama_protocol.py      # FASE 6: membaca format streaming Ollama
+├── tools/mock_ollama.py        # FASE 6: pengganti Ollama untuk lab tanpa model
 ├── security/
 │   ├── tls_certs.py            # FASE 2: CA lab + sertifikat server
-│   └── payload_crypto.py       # FASE 3: interface Fernet (belum dipakai)
+│   └── payload_crypto.py       # FASE 3/4: enkripsi payload Fernet + key_id
 ├── secrets/                    # sertifikat & key (tidak di-commit)
 ├── scripts/                    # setup_windows.ps1, setup_kali.sh, run_demo.ps1, make_certs.py
 ├── logs/                       # output JSONL (tidak di-commit)
@@ -676,33 +690,79 @@ Host-Only. Server Windows memakai opsi baru `--tcp-nodelay` dan `--keep-alive`; 
 sehingga selisih RTT yang terlihat bercampur dengan efek Nagle dan handshake per request.
 Perbandingan yang adil perlu diulang dengan pengaturan Run D di kedua arah (belum dilakukan).
 
-## 17. Roadmap Fase 3: application-layer encryption (Fernet)
+## 17. Fase 3 & 4: enkripsi payload (Fernet) + dekripsi sah
 
 ```
-plaintext → Fernet encrypt → HTTPS/TLS → network → TLS terminate → Fernet decrypt → original payload
+plaintext → Fernet encrypt (client) → HTTPS/TLS → network → TLS terminate (server)
+          → Fernet decrypt HANYA oleh pemegang kunci → plaintext → log / observability
 ```
 
-Interface sudah tersedia di `security/payload_crypto.py` (dan diuji di
-`tests/test_payload_crypto.py`), **belum** dipakai oleh server/client:
+Status per 2026-09-28: **diimplementasikan dan diuji di satu mesin** (loopback, dengan capture).
+**Belum diuji lintas host Windows ↔ Kali.**
 
-```python
-from security.payload_crypto import generate_key, load_key, encrypt_payload, decrypt_payload
+### 17.1 Cara kerja
+- Endpoint baru **`POST /api/secure-test`** (endpoint `/api/test` Fase 1/2 tidak berubah).
+- Request berupa *envelope*: metadata untuk routing/korelasi tetap plaintext, isi bisnis dienkripsi.
+  ```json
+  {"request_id": "…", "sender": "kali", "sequence": 1, "sent_at": "…",
+   "enc": "fernet", "key_id": "9049597648c7", "ciphertext": "gAAAAA…"}
+  ```
+  Di dalam `ciphertext`: `{"message": "…"}`. Fernet = AES-128-CBC + HMAC-SHA256, jadi kunci salah
+  atau ciphertext yang diubah **gagal**, bukan menghasilkan data acak.
+- `key_id` = 12 karakter pertama SHA-256 dari kunci: kedua host bisa memastikan kuncinya sama tanpa
+  membocorkan kunci.
+- Server **dengan** kunci = titik dekripsi sah (Test D): `decryption_status="authorized"`, isi pesan
+  tercatat di log server, balasan juga dienkripsi (`ciphertext` di response).
+- Server **tanpa** kunci (Test C): request diterima (200), `decryption_status="not_authorized"`, isi
+  pesan **tidak pernah dibaca/dicatat**.
+- Kunci salah / ciphertext diubah: HTTP 400, `decryption_status="failed"`.
 
-key = load_key()                          # dari FERNET_KEY atau file FERNET_KEY_FILE (bukan hard-code)
-token = encrypt_payload(payload, key)     # dict -> str (Fernet token)
-payload = decrypt_payload(token, key)     # str -> dict; key salah / token diubah -> PayloadCryptoError
+### 17.2 Kunci
+```powershell
+python scripts/make_fernet_key.py            # membuat secrets/fernet.key (menolak menimpa), mencetak key_id
+python scripts/make_fernet_key.py --show     # key_id kunci yang ada
 ```
+`.env` setiap host yang boleh **mendekripsi**: `FERNET_KEY_FILE=secrets/fernet.key`. Salin kunci hanya
+lewat jaringan lab (`scp`), tidak pernah lewat git. Client yang mengenkripsi juga butuh kunci yang sama.
 
-Rencana integrasi:
-1. Buat key: `python -c "from security.payload_crypto import generate_key; print(generate_key().decode())" > secrets/fernet.key`
-   lalu salin ke host lain lewat jalur aman (bukan lewat API yang sedang diamati).
-2. Client mengirim `{"request_id": ..., "sender": ..., "ciphertext": "<token>"}` — `request_id`
-   tetap plaintext agar observasi/korelasi tetap mungkin di app layer; isi pesan dienkripsi.
-3. Server mendekripsi dengan key yang sah, lalu memvalidasi isi dengan `ApiTestRequest`.
-4. Ekspektasi observasi: bahkan pihak yang melihat body setelah TLS terminate (mis. reverse proxy,
-   log middleware) hanya melihat ciphertext; hanya pemilik key yang melihat payload asli.
+### 17.3 Menjalankan
+```bash
+# server: otomatis memakai FERNET_KEY_FILE bila ada (Test D); --no-app-decrypt untuk Test C
+python server/api_server.py                      # log: "app-layer decryption: AUTHORIZED key_id=…"
+python server/api_server.py --no-app-decrypt     # log: "… accepted unread (Test C)"
+# client
+python client/traffic_generator.py --app-encrypt --count 5 --delay 5
+```
+Uji satu mesin: `scripts\run_demo.ps1 -Capture -Tls -AppEncrypt` (Test D) dan tambah `-ServerNoKey`
+(Test C); tanpa `-Tls` untuk melihat envelope di kabel.
 
-## 18. Fase 4: Ollama lewat HTTPS gateway (prompt & jawaban di kedua host)
+### 17.4 Field event
+| Field | Arti |
+|---|---|
+| `app_encryption` | `"fernet"` bila payload dienkripsi aplikasi; `null` untuk `/api/test` |
+| `key_id` | sidik jari kunci (bukan kunci) |
+| `ciphertext_bytes` | panjang ciphertext |
+| `decryption_status` | `authorized` / `not_authorized` / `failed` / `null` |
+| `payload.message` | hanya terisi dari sumber yang sah melihat plaintext (log client, log server pemegang kunci) |
+
+### 17.5 Hasil uji satu mesin (2026-09-28, capture loopback)
+| Varian | Isi pesan di log server | Yang terlihat di kabel |
+|---|---|---|
+| Test D: HTTPS + enkripsi + server punya kunci | ✔ (`authorized`); balasan terenkripsi terbaca client | hanya TLS record; request 643 B (Fase 2: ~472 B) |
+| Test C: HTTPS + enkripsi + server tanpa kunci | ✘ (`not_authorized`) | hanya TLS record |
+| HTTP + enkripsi + server punya kunci | ✔ | envelope terbaca (`request_id`, `sender`, `sequence`, `enc`, `key_id`) tetapi isi hanya `ciphertext` |
+
+Temuan: dengan enkripsi payload saja (tanpa TLS), pengamat jaringan masih tahu **siapa, kapan,
+urutan, dan bahwa payload terenkripsi**, dan bisa mengkorelasi lewat `request_id` — tetapi tidak isinya.
+Dengan TLS + enkripsi payload, bahkan komponen yang membuka TLS (mis. server tanpa kunci / proxy)
+tidak bisa membaca isi.
+
+### 17.6 Keterbatasan
+- Kunci simetris tunggal untuk lab (tanpa rotasi, tanpa per-pasangan host).
+- `sent_at` tidak dipakai sebagai TTL Fernet (tidak ada perlindungan replay di lab ini).
+- Belum diterapkan ke traffic Ollama (Fase 6); gateway saat ini hanya TLS.
+
+## 18. Fase 6: Ollama lewat HTTPS gateway (prompt & jawaban di kedua host)
 
 Lanjutan dari POC awal (Ubuntu → Ollama di Windows lewat HTTP polos, `POST /api/generate`, capture
 TShark). Sekarang traffic LLM **terenkripsi (HTTPS)** di jaringan, tetapi **prompt dan jawaban

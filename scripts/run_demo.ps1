@@ -7,12 +7,17 @@
   directory (logs/demo) so it does not mix with real experiment logs.
   With -Capture it also captures on the Npcap loopback adapter using TShark.
   With -Tls it runs over HTTPS (Phase 2) using a throw-away demo CA in logs/demo/certs.
+  With -AppEncrypt the client Fernet-encrypts the payload (Phase 3, /api/secure-test) and the
+  server holds the demo key = authorized decryption (Test D). Add -ServerNoKey for Test C: the
+  server gets no key and accepts the payload without being able to read it.
   The demo ignores the project .env so real lab settings cannot interfere.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\run_demo.ps1
   powershell -ExecutionPolicy Bypass -File scripts\run_demo.ps1 -Capture -Count 3 -Delay 2
   powershell -ExecutionPolicy Bypass -File scripts\run_demo.ps1 -Capture -Tls
+  powershell -ExecutionPolicy Bypass -File scripts\run_demo.ps1 -Capture -Tls -AppEncrypt               # Test D
+  powershell -ExecutionPolicy Bypass -File scripts\run_demo.ps1 -Capture -Tls -AppEncrypt -ServerNoKey  # Test C
 #>
 param(
     [int]$Port = 8765,
@@ -20,6 +25,8 @@ param(
     [double]$Delay = 2,
     [switch]$Capture,
     [switch]$Tls,
+    [switch]$AppEncrypt,
+    [switch]$ServerNoKey,
     [string]$Interface = "\Device\NPF_Loopback",
     [string]$LogDir = "logs/demo"
 )
@@ -62,7 +69,16 @@ if ($Tls) {
     $env:TLS_CA_FILE = Join-Path $certDir "ca.pem"
     $scheme = "https"
 }
-$observerSeconds = [int](6 + $Count * $Delay + 6)
+$clientExtra = @()
+if ($AppEncrypt) {
+    # Demo-only Fernet key (never the real lab key). The CLIENT always gets it; the SERVER only
+    # without -ServerNoKey.
+    $demoKey = Join-Path $absLogDir "certs\fernet.key"
+    if (-not (Test-Path $demoKey)) { & $Python scripts/make_fernet_key.py --file $demoKey | Out-Null }
+    $clientExtra = @("--app-encrypt", "--key-file", $demoKey)
+    if (-not $ServerNoKey) { $env:FERNET_KEY_FILE = $demoKey }
+}
+$observerSeconds = [int](70 + $Count * $Delay + 6)  # includes up to 60 s for TShark to start
 
 $server = $null; $observer = $null
 try {
@@ -85,9 +101,19 @@ try {
         try { $tcp.Connect("127.0.0.1", $Port); $ready = $true } catch { } finally { $tcp.Close() }
     }
     if (-not $ready) { throw "server did not start; see $absLogDir\server.err" }
-    Start-Sleep -Seconds 3  # give TShark time to start capturing
+    if ($Capture) {
+        # TShark can take from 1 s to well over 10 s to start; wait for it instead of guessing.
+        $capturing = $false
+        for ($i = 0; $i -lt 120 -and -not $capturing; $i++) {
+            Start-Sleep -Milliseconds 500
+            $capturing = [bool](Select-String -Path "$absLogDir\observer.out" -Pattern "Capturing on" -Quiet -ErrorAction SilentlyContinue)
+        }
+        if (-not $capturing) { throw "TShark did not start capturing within 60 s; see $absLogDir\observer.out" }
+    } else {
+        Start-Sleep -Seconds 2
+    }
 
-    & $Python client/traffic_generator.py --target "$($scheme)://127.0.0.1:$Port" --sender local-client --count $Count --delay $Delay
+    & $Python client/traffic_generator.py --target "$($scheme)://127.0.0.1:$Port" --sender local-client --count $Count --delay $Delay @clientExtra
     $clientExit = $LASTEXITCODE
 
     Write-Host "[demo] waiting for observer to finish ($observerSeconds s window) ..."
@@ -106,8 +132,9 @@ $eventsFile = Join-Path $absLogDir "api-events.jsonl"
 if (Test-Path $eventsFile) {
     $events = Get-Content $eventsFile | ForEach-Object { $_ | ConvertFrom-Json }
     Write-Host "`n===== $eventsFile ($($events.Count) events) ====="
-    $events | Select-Object direction, transport, tls_version, method, endpoint, status_code, latency_ms,
-        latency_source, server_processing_ms, wire_latency_ms, tcp_stream, request_bytes,
+    $events | Select-Object direction, transport, method, endpoint, status_code, latency_ms,
+        server_processing_ms, request_bytes, app_encryption, decryption_status,
+        @{n = "message"; e = { $_.payload.message } },
         @{n = "evidence"; e = { $_.evidence -join "," } }, capture_match |
         Format-Table -AutoSize | Out-String -Width 250 | Write-Host
 } else {

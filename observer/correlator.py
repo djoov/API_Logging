@@ -33,6 +33,14 @@ SERVER_RECORD_TYPES = ("server_exchange", "llm_gateway_exchange")
 CLOCK_TOLERANCE_S = 0.002
 
 
+SECURITY_FIELDS = ("app_encryption", "key_id", "ciphertext_bytes", "decryption_status")
+
+
+def _security_fields(rec: dict[str, Any]) -> dict[str, Any]:
+    """Phase 3/4 fields written by client/server logs (absent for plain /api/test)."""
+    return {name: rec.get(name) for name in SECURITY_FIELDS}
+
+
 def _epoch(iso: str | None) -> float | None:
     if not iso:
         return None
@@ -68,7 +76,7 @@ class ExchangeCorrelator:
         self.merge_window = merge_window
         self.incomplete_timeout = incomplete_timeout
         # Idle time that ends a TLS exchange nobody logged. LLM answers can pause between
-        # streamed pieces, so Phase 4 uses a longer value than the plain API lab.
+        # streamed pieces, so Phase 6 uses a longer value than the plain API lab.
         self.tls_idle = merge_window if tls_idle is None else tls_idle
         self._pending: dict[str, _Pending] = {}
         self._frame_to_key: dict[int, str] = {}  # capture request frame -> key (fallback pairing)
@@ -103,6 +111,7 @@ class ExchangeCorrelator:
             "transport": rec.get("transport"),
             "tls_version": rec.get("tls_version"),
             "tls_cipher": rec.get("tls_cipher"),
+            **_security_fields(rec),
         })
         self._merge_payload(entry, rec.get("payload"))
         self._merge_llm(entry, rec.get("llm"))
@@ -130,6 +139,7 @@ class ExchangeCorrelator:
             "status_code": rec.get("status_code"),
             "server_processing_ms": rec.get("server_processing_ms"),
             "transport": rec.get("transport"),
+            **_security_fields(rec),
         })
         self._merge_payload(entry, rec.get("payload"))
         self._merge_llm(entry, rec.get("llm"))
@@ -158,6 +168,12 @@ class ExchangeCorrelator:
                 "tcp_stream": rec.tcp_stream,
                 "request_bytes": rec.message_len,
             })
+            if rec.body.get("enc"):
+                entry.merge({
+                    "app_encryption": rec.body.get("enc"),
+                    "key_id": rec.body.get("key_id"),
+                    "ciphertext_bytes": len(rec.body.get("ciphertext", "")) or None,
+                })
             if rec.body:
                 sequence = rec.body.get("sequence")
                 self._merge_payload(entry, {
@@ -349,7 +365,7 @@ class ExchangeCorrelator:
 
     @staticmethod
     def _merge_llm(entry: _Pending, llm: dict[str, Any] | None) -> None:
-        """Phase 4: prompt/answer/timing from the LLM client and/or the gateway, gaps filled."""
+        """Phase 6: prompt/answer/timing from the LLM client and/or the gateway, gaps filled."""
         if not llm:
             return
         current = entry.fields.setdefault("llm", {})
@@ -435,5 +451,9 @@ class ExchangeCorrelator:
             tls_sni=f.get("tls_sni"),
             capture_match=capture_match,
             llm=f.get("llm"),
+            app_encryption=f.get("app_encryption"),
+            key_id=f.get("key_id"),
+            ciphertext_bytes=f.get("ciphertext_bytes"),
+            decryption_status=f.get("decryption_status"),
         )
         return event.to_record()

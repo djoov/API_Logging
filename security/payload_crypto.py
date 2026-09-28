@@ -1,22 +1,26 @@
-"""PHASE 3 preparation: application-layer payload encryption with Fernet.
+"""PHASE 3/4: application-layer payload encryption (Fernet) and authorized decryption.
 
-NOT wired into the server/client yet. Phase 1 (plaintext HTTP) must be stable first.
+    plaintext dict -> encrypt_payload() -> envelope {"enc": "fernet", "key_id", "ciphertext"} over HTTPS
+    -> TLS terminates at the server -> decrypt_payload() by the holder of the key -> original dict
 
-Flow in Phase 3:
-    plaintext dict -> encrypt_payload() -> {"ciphertext": "..."} over HTTPS
-    -> TLS terminates at the server -> decrypt_payload() with the shared key -> original dict
+Fernet = AES-128-CBC + HMAC-SHA256 with a timestamp: confidentiality AND integrity, so a wrong key
+or a tampered token fails loudly (PayloadCryptoError) instead of producing garbage.
 
-Keys are never stored in source code. They come from the FERNET_KEY environment variable
-or from a local secret file named by FERNET_KEY_FILE (keep it out of version control).
+Keys are never stored in source code. They come from FERNET_KEY (the key itself) or from a local
+secret file (FERNET_KEY_FILE, e.g. secrets/fernet.key, kept out of version control). key_id() is a
+short fingerprint so both hosts can confirm they hold the same key without revealing it.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
+
+ALGORITHM = "fernet"
 
 
 class PayloadCryptoError(ValueError):
@@ -27,17 +31,37 @@ def generate_key() -> bytes:
     return Fernet.generate_key()
 
 
-def load_key() -> bytes:
-    """Load the key from FERNET_KEY, or from the file named by FERNET_KEY_FILE."""
+def key_id(key: bytes | str) -> str:
+    """Public fingerprint of a key (first 12 hex chars of SHA-256). Safe to log; not the key."""
+    raw = key.encode("ascii") if isinstance(key, str) else key
+    return hashlib.sha256(raw.strip()).hexdigest()[:12]
+
+
+def write_key_file(path: Path) -> bytes:
+    """Create a new key file. Refuses to overwrite: replacing a key breaks the other host."""
+    if path.exists():
+        raise FileExistsError(f"{path} already exists; delete it explicitly to replace the key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    key = generate_key()
+    path.write_bytes(key + b"\n")
+    if os.name == "posix":
+        path.chmod(0o600)
+    return key
+
+
+def load_key(key_file: Path | None = None) -> bytes:
+    """Load the key from FERNET_KEY, else from key_file, else from the file named by FERNET_KEY_FILE."""
     key = os.getenv("FERNET_KEY", "").strip()
     if not key:
-        key_file = os.getenv("FERNET_KEY_FILE", "").strip()
-        if not key_file:
-            raise PayloadCryptoError("set FERNET_KEY or FERNET_KEY_FILE")
-        path = Path(key_file)
-        if not path.is_file():
-            raise PayloadCryptoError(f"FERNET_KEY_FILE not found: {path}")
-        key = path.read_text(encoding="ascii").strip()
+        if key_file is None:
+            env_file = os.getenv("FERNET_KEY_FILE", "").strip()
+            if not env_file:
+                raise PayloadCryptoError("set FERNET_KEY or FERNET_KEY_FILE")
+            key_file = Path(env_file)
+        if not key_file.is_file():
+            raise PayloadCryptoError(f"FERNET_KEY_FILE not found: {key_file}")
+        key = key_file.read_text(encoding="ascii").strip()
+    _fernet(key)  # validate format early
     return key.encode("ascii")
 
 

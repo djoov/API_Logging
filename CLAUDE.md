@@ -11,7 +11,9 @@ sampai habis sebelum mulai. Bahasa komunikasi dengan user: **Bahasa Indonesia**.
 - **Jangan commit** `.env`, `secrets/`, `logs/`, `*.pcap*` (sudah di `.gitignore`; tetap periksa
   `git diff --cached --name-only` sebelum commit).
 - **`secrets/ca.key` tidak pernah keluar dari Windows.** Kali hanya boleh punya `ca.pem`,
-  `kali.pem`, `kali.key`.
+  `kali.pem`, `kali.key`, dan (Fase 3/4) `fernet.key` — disalin lewat scp di jaringan lab.
+- Jangan membuat ulang `secrets/fernet.key` bila sudah ada (host lain memakai kunci yang sama;
+  `scripts/make_fernet_key.py` menolak menimpa). Cek kesamaan kunci lewat `--show` (key_id).
 - Jangan mematikan firewall, jangan `verify=False`, jangan mendekripsi traffic dengan cara bypass.
   Dekripsi hanya lewat titik yang sah (gateway pemilik sertifikat, atau `SSLKEYLOGFILE` dari client
   milik user sendiri untuk ground truth).
@@ -26,7 +28,7 @@ sampai habis sebelum mulai. Bahasa komunikasi dengan user: **Bahasa Indonesia**.
 | Path project | `D:\Project\researcher_01\api-observability-lab` | `~/Documents/API_Logging` |
 | IP lab (Host-Only, statis) | `192.168.56.1` — adapter **`Ethernet 2`** | `192.168.56.10` — **`eth1`** |
 | Internet | Wi-Fi (sering Wi-Fi publik) | `eth0` NAT `10.0.2.15` |
-| Peran Fase 4 | **gateway host**: `gateway/ollama_gateway.py` + mock Ollama / Ollama | **client host**: `client/llm_client.py` |
+| Peran Fase 6 (Ollama) | **gateway host**: `gateway/ollama_gateway.py` + mock Ollama / Ollama | **client host**: `client/llm_client.py` |
 | Capture | TShark (tidak di PATH; observer menemukannya), interface `\Device\NPF_{31A40843-...}` = Ethernet 2 | TShark/tcpdump di `eth1` (user di grup `wireshark` atau pakai sudo) |
 | Firewall | rule "API Observability Lab TCP 8000" (hanya `Ethernet 2`) ada; rule TCP 8443 untuk gateway **belum dibuat** per 2026-09-24 (butuh Administrator, README §18.2) | tidak ada firewall aktif |
 
@@ -35,15 +37,19 @@ README §18.3.
 
 Environment Python: conda env **`api-observability`** (`environment.yml`). Test: `python -m pytest`.
 
-## Status fase
-| Fase | Isi | Status |
-|---|---|---|
-| 1 | HTTP dua arah, correlation via `request_id` | selesai, diuji dua host |
-| 2 | HTTPS/TLS, observer membaca TLS record tanpa dekripsi, korelasi 4-tuple + kausalitas | selesai, diuji dua host |
-| – | Eksperimen transport Run A–D (Nagle di Windows, keep-alive) | selesai, README §16 |
-| 3 | Fernet (application-layer encryption) | interface siap (`security/payload_crypto.py`), belum dipasang |
-| 4 | Ollama lewat HTTPS gateway, prompt+jawaban tercatat di kedua host | kode selesai, smoke test 1 mesin OK; **uji lintas host Windows↔Kali belum** |
-| – | Perbandingan ulang Fase 1 vs 2 dengan setelan Run D | ditunda user |
+## Status fase (penomoran = acuan user, disepakati 2026-09-28)
+| Fase | Isi | Test | Status |
+|---|---|---|---|
+| 1 | HTTP plaintext, correlation via `request_id` | A | selesai, diuji dua arah |
+| 2 | HTTPS/TLS, observer membaca TLS record tanpa dekripsi, korelasi 4-tuple + kausalitas | B | selesai, diuji dua arah |
+| – | Eksperimen transport Run A–D (Nagle di Windows, keep-alive) | – | selesai, README §16 |
+| 3 | Enkripsi payload application-layer (Fernet), `POST /api/secure-test`, `--app-encrypt` | C | diuji 1 mesin (2026-09-28); **lintas host belum** |
+| 4 | Dekripsi sah: server dengan `FERNET_KEY_FILE` = `authorized`, tanpa = `not_authorized` | D | diuji 1 mesin (2026-09-28); **lintas host belum** |
+| 5 | Korelasi dua arah | F | selesai untuk API lab (HTTP/HTTPS); belum untuk traffic Ollama |
+| 6 | Workload Ollama asli lewat HTTPS gateway | E | lintas host Kali → Windows `gemma3:4b` OK 3/3 (2026-09-28) |
+| 7 | Analisis AI / deteksi anomali | – | belum |
+| 8 | Observability lebih dalam (eBPF / telemetri jaringan) | – | belum |
+| – | Perbandingan ulang Fase 1 vs 2 dengan setelan Run D | – | ditunda user |
 
 Dokumen: `README.md` (teknis, §1–§18), `docs/laporan-perjalanan.md` (cerita + 14 masalah, bahasa
 sederhana dengan istilah teknis), `docs/collab-log.md` (log kerja bersama dua sesi).

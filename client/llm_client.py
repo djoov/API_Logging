@@ -1,4 +1,4 @@
-"""PHASE 4: send prompts to Ollama through the HTTPS gateway and log prompt + full answer.
+"""PHASE 6: send prompts to Ollama through the HTTPS gateway and log prompt + full answer.
 
     python client/llm_client.py --prompt "Jelaskan TCP handshake"
     python client/llm_client.py --prompts-file prompts.txt --count 3 --delay 5 --endpoint chat

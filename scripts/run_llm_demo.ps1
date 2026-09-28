@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Phase 4 smoke test on ONE Windows machine: mock Ollama + HTTPS gateway + observer + LLM client.
+  Phase 6 smoke test on ONE Windows machine: mock Ollama + HTTPS gateway + observer + LLM client.
 
 .DESCRIPTION
   Everything runs on 127.0.0.1 with a throw-away demo CA (logs/demo/certs) and its own log folder

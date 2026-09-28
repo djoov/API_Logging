@@ -1,4 +1,4 @@
-"""PHASE 4: HTTPS gateway in front of Ollama that logs every prompt and answer.
+"""PHASE 6: HTTPS gateway in front of Ollama that logs every prompt and answer.
 
     client ──HTTPS──▶ gateway (TLS terminates here, full prompt/answer logged) ──HTTP──▶ Ollama on 127.0.0.1
 

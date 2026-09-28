@@ -288,6 +288,67 @@ body setelah header response), record itu tertahan **~40 ms**.
 
 ---
 
+## Peta tahap ↔ fase
+
+Mulai 28 September 2026 penomoran **fase** mengikuti skema penelitian: 1 HTTP · 2 HTTPS/TLS ·
+3 enkripsi payload · 4 dekripsi sah · 5 korelasi dua arah · 6 workload Ollama asli · 7 analisis AI ·
+8 eBPF. **Tahap** di dokumen ini adalah urutan kejadian: Tahap 1 = Fase 1, Tahap 2 = Fase 2,
+Tahap 3 = investigasi transport, Tahap 4 = Fase 6, Tahap 5 = Fase 3 & 4.
+
+---
+
+## Tahap 4 — Fase 6: workload Ollama asli (LLM)
+
+**Yang dibangun:** **gateway HTTPS** (*reverse proxy*) di depan **Ollama** — server LLM yang tetap
+hanya mendengarkan di `127.0.0.1:11434`, jadi tidak bisa dihubungi langsung dari jaringan. Client
+(**LLM client**) mengirim prompt lewat HTTPS; gateway, yang memegang sertifikat server, membuka TLS
+secara sah, mencatat **prompt dan jawaban utuh**, lalu meneruskannya ke Ollama. 📮 Loket resmi di
+depan dapur: tamu hanya boleh bicara lewat loket, dan petugas loket mencatat setiap pesanan.
+
+**Istilah penting:**
+- **Streaming (NDJSON)** — jawaban dikirim potongan demi potongan, satu objek JSON per baris.
+- **TTFT** (*time to first token*) — waktu sampai potongan jawaban pertama.
+- **`load_duration`** — waktu Ollama memuat model ke memori = *cold start* yang sebenarnya.
+- **`prompt_eval_duration` / `eval_duration`** — waktu membaca prompt / menghasilkan jawaban.
+
+**Hasil (28-09, `gemma3:4b`, Kali → Windows lintas host, 3/3 berhasil):** total waktu di client
+5–13 detik, dan hampir seluruhnya waktu Ollama menghasilkan token; gateway + TLS + jaringan hanya
+~10–90 ms. Uji langsung pertama hari itu menunjukkan **cold start 43 detik** hanya untuk memuat model.
+Ini persis pola "server tampak normal tapi API lambat" dari POC awal (latency 143 detik).
+
+**Temuan penting — token-length side channel:** setiap potongan streaming = satu **TLS record**
+terenkripsi. Jumlah record = jumlah token jawaban, dan ukuran record berubah mengikuti panjang token.
+Isi tidak terbaca, tetapi panjang dan jumlah token terlihat oleh siapa pun yang merekam jaringan.
+
+---
+
+## Tahap 5 — Fase 3 & 4: enkripsi payload + dekripsi sah
+
+**Yang dibangun:** endpoint `POST /api/secure-test`. Client mengenkripsi isi pesan dengan **Fernet**
+(**AES** + **HMAC**, enkripsi simetris dengan pemeriksaan keutuhan) *sebelum* dikirim lewat HTTPS.
+Metadata untuk routing (`request_id`, `sender`, `sequence`) tetap terbuka di **envelope**; isi pesan
+hanya ada di **ciphertext**. 📮 Surat yang isinya ditulis dengan sandi, lalu tetap dimasukkan amplop
+tersegel; nomor resi ditulis di luar supaya kantor pos bisa mengantar.
+
+**Istilah penting:**
+- **Application-layer encryption** — enkripsi oleh aplikasi, terpisah dari TLS (**transport-layer**).
+- **Authorized decryption point** — pihak yang **sah memegang kunci** dan boleh membuka isi.
+- **`key_id`** — sidik jari pendek kunci (bagian dari **SHA-256**), untuk memastikan dua host memakai
+  kunci yang sama tanpa membocorkannya.
+
+**Hasil (28-09, satu mesin, dengan capture):**
+
+| Test | Keadaan | Siapa bisa membaca isi pesan |
+|---|---|---|
+| C | HTTPS + enkripsi payload, server **tanpa** kunci | hanya client (`decryption_status=not_authorized`) |
+| D | HTTPS + enkripsi payload, server **dengan** kunci | client dan server (`authorized`); balasan juga terenkripsi |
+| – | HTTP + enkripsi payload | pengamat jaringan melihat envelope (`request_id`, `sequence`, `enc=fernet`) tetapi isi hanya ciphertext |
+
+Kunci salah atau ciphertext yang diubah ditolak (HTTP 400, `failed`). Uji lintas host Windows ↔ Kali
+untuk Test C/D **belum dilakukan**.
+
+---
+
 ## Hal lain di luar eksperimen
 
 - **Co-author Claude di GitHub.** Commit pertama sempat memuat baris `Co-Authored-By`. Riwayat
@@ -317,7 +378,7 @@ body setelah header response), record itu tertahan **~40 ms**.
 | 14 | 3 — Investigasi | Keep-alive client terlewat | eksperimen | Selesai |
 | – | 3 — Investigasi | Penyebab **cold start** 20–50 ms | terbuka | **Belum diketahui** |
 
-Total **81 unit test** lulus. Semua bug observer (#8, #10–#13) punya regression test berbasis
+Total **103 unit test** lulus (per 28-09). Semua bug observer (#8, #10–#13) punya regression test berbasis
 **rekaman asli** dari kejadiannya.
 
 ---
@@ -347,6 +408,8 @@ Total **81 unit test** lulus. Semua bug observer (#8, #10–#13) punya regressio
    Run A (Nagle aktif, handshake per request), sehingga selisihnya bercampur efek lain. Perlu diulang
    dengan pengaturan Run D di kedua arah.
 2. **Mencari penyebab cold start** pada request pertama setelah server di-restart.
-3. **Fase 3 — application-layer encryption (Fernet):** payload dienkripsi oleh aplikasi sebelum masuk
-   HTTPS. Fungsi `encrypt_payload` / `decrypt_payload` sudah dibuat dan diuji, tapi belum dipasang.
-4. **Keputusan soal unreachable commit** yang masih memuat co-author Claude di GitHub.
+3. **Fase 3 & 4 lintas host:** Test C dan D antara Windows dan Kali (kunci Fernet disalin lewat scp).
+4. **Fase 5 untuk Ollama:** korelasi dua arah pada traffic LLM (saat ini Ollama hanya di Windows).
+5. **Fase 7 — analisis AI / deteksi anomali** di atas event JSONL, dan **Fase 8 — eBPF**.
+6. **Anomali 80 ms** pada satu request Test E (terjadi di sisi Kali sebelum request tiba di Windows).
+7. **Keputusan soal unreachable commit** yang masih memuat co-author Claude di GitHub.
