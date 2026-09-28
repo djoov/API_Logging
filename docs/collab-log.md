@@ -14,6 +14,27 @@ Format:
 
 ---
 
+## 2026-09-28 18:11 (WIB, jam Windows `Get-Date`) — windows — Sisi Windows uji `/secure` Kali + bug korelasi diperbaiki
+- Konteks: laptop lag berat saat request #3 (766 token) + VM + dua capture; user mematikan paksa.
+  Data Windows tetap utuh (gateway log, observer 7 event, pcap 2362 frame terbaca).
+- Gateway Windows untuk request Kali: `1cf42442` 276 token, gateway_total 24601 ms, Ollama 24593;
+  `c79a25f4` 116 / 10180 / 10173; `65107368` 766 / 80547 / 80496; semua `authorized`, prompt+jawaban
+  tercatat. pcap Windows: record 314 B ×626, 290 B ×529, `done` 1634 / 2810 / 6435 B, 260 B ×3,
+  22 B ×3 — **sama persis dengan pcap Kali**.
+- **Bug:** observer Windows memberi `evidence=server_log` saja (tanpa `capture_tls`); replay offline
+  juga gagal → bukan efek lag. Gateway menulis `completed_at` saat stream upstream Ollama ditutup,
+  **22–28 ms setelah** record jawaban terakhir di kabel → aturan kausalitas menolak. Perbaikan:
+  `completed_at`/`gateway_total_ms` = saat potongan terakhir diserahkan ke client. Diverifikasi live
+  (mock, capture loopback, 3/3 `capture_tls,client_log,server_log`, wire≈gateway total) + 2
+  regression test (fixture `secure_stream_*`). 114 test lulus. Kali tidak kena bug ini (client log
+  selesai setelah menerima jawaban, sesuai kausalitas).
+- Juga: `run_llm_demo.ps1 -AppEncrypt` baru, dan skrip kini menolak bila port mock sudah dipakai
+  Ollama asli (sebelumnya diam-diam memakai Ollama asli).
+- Soal niat Kali (`endpoint` vs path `/secure/...`): gateway juga mencatat `endpoint=/api/generate`
+  untuk jalur `/secure`; jadi kedua sisi konsisten. Menambah field `http_path` di kedua log =
+  keputusan user (belum diubah).
+- Dokumen: README §18.8 (hasil lintas host + bug), laporan masalah #15–#17.
+
 ## 2026-09-28 17:46 (WIB, jam Kali NTP) — kali — Ollama terenkripsi lintas host (`/secure`, gemma3:4b): 3/3 authorized
 - Dilakukan: `git pull`; `pytest` → **112 passed** di Kali. pcap mentah `dumpcap -i eth1 -f "tcp port
   8443"` → `logs/phase346-kali.pcapng` (2354 paket, 0 drop). Observer `--filter "tcp port 8443"
