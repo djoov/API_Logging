@@ -142,7 +142,9 @@ def test_tcp_nodelay_listener_reaches_accepted_connections(settings: Settings, c
     monkeypatch.setattr(base_events, "_set_nodelay", spy)
     port = _free_port()
     listener = make_listening_socket("127.0.0.1", port, tcp_nodelay=True)
-    server = uvicorn.Server(uvicorn.Config(create_app(settings), log_level="warning", timeout_keep_alive=10,
+    # loop="asyncio": the spy above hooks asyncio's own TCP_NODELAY path. With uvloop installed
+    # (Kali's system Python) uvicorn would pick uvloop and the spy would never be called.
+    server = uvicorn.Server(uvicorn.Config(create_app(settings), loop="asyncio", log_level="warning", timeout_keep_alive=10,
                                            ssl_certfile=str(certs / "local.pem"),
                                            ssl_keyfile=str(certs / "local.key")))
     thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
