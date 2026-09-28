@@ -46,7 +46,7 @@ Environment Python: conda env **`api-observability`** (`environment.yml`). Test:
 | 3 | Enkripsi payload application-layer (Fernet), `POST /api/secure-test`, `--app-encrypt` | C | selesai: 1 mesin + lintas host dua arah 9/9 (2026-09-28), README §17.6 |
 | 4 | Dekripsi sah: server dengan `FERNET_KEY_FILE` = `authorized`, tanpa = `not_authorized` | D | selesai: lintas host dua arah (2026-09-28); kunci `key_id=80dacc3b5d23` di kedua host |
 | 5 | Korelasi dua arah | F | selesai untuk API lab (HTTP/HTTPS); belum untuk traffic Ollama |
-| 6 | Workload Ollama asli lewat HTTPS gateway | E | lintas host Kali → Windows `gemma3:4b` OK 3/3 (2026-09-28) |
+| 6 | Workload Ollama asli lewat HTTPS gateway (+ `/secure/api/*` enkripsi payload, README §18.8) | E | lintas host Kali → Windows `gemma3:4b` OK 3/3; jalur `/secure` baru diuji dengan mock (2026-09-28) |
 | 7 | Analisis AI / deteksi anomali | – | belum |
 | 8 | Observability lebih dalam (eBPF / telemetri jaringan) | – | belum |
 | – | Perbandingan ulang Fase 1 vs 2 dengan setelan Run D | – | ditunda user |

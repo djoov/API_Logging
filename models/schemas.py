@@ -16,6 +16,7 @@ HEADER_REQUEST_ID = "X-Request-ID"
 HEADER_SENDER = "X-Sender"
 HEADER_RECEIVER = "X-Receiver"
 HEADER_PROCESSING_MS = "X-Processing-Time-Ms"
+HEADER_DECRYPTION = "X-Decryption-Status"  # Phase 3/4 on the streaming Ollama gateway
 
 
 def new_request_id() -> str:
@@ -100,6 +101,29 @@ class SecureTestResponse(BaseModel):
     enc: Literal["fernet"] | None = None
     key_id: str | None = None
     ciphertext: str | None = None  # encrypted reply, only when the server could decrypt
+
+
+class SecureLlmEnvelope(BaseModel):
+    """Phase 3/4 + 6 envelope for POST /secure/api/generate|chat on the Ollama gateway.
+
+    The WHOLE Ollama request body (model, prompt/messages, options) is inside the ciphertext;
+    only routing/correlation metadata is clear.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    sender: str = Field(pattern=NODE_NAME_PATTERN)
+    sequence: int = Field(ge=1)
+    sent_at: AwareDatetime
+    enc: Literal["fernet"]
+    key_id: str = Field(min_length=1, max_length=32)
+    ciphertext: str = Field(min_length=1, max_length=2_000_000)
+
+    @field_validator("request_id")
+    @classmethod
+    def _check_request_id(cls, value: str) -> str:
+        return normalize_request_id(value)
 
 
 class HealthResponse(BaseModel):

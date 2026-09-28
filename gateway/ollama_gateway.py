@@ -9,11 +9,18 @@ logs/server-events.jsonl (record_type "llm_gateway_exchange").
 
     python gateway/ollama_gateway.py                     # uses GATEWAY_*, OLLAMA_URL, TLS_* from .env
     python gateway/ollama_gateway.py --ollama-url http://127.0.0.1:11434 --port 8443
+
+Phase 3/4 on top of this (application-layer encryption): POST /secure/api/generate|chat carries an
+envelope whose ciphertext holds the whole Ollama request. With FERNET_KEY_FILE the gateway is the
+authorized decryption point: it decrypts, calls Ollama in plaintext on 127.0.0.1, logs prompt and
+answer, and re-encrypts the answer line by line (each streamed NDJSON piece separately). Without a
+key it cannot call Ollama at all and answers 403 (decryption_status "not_authorized").
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -34,12 +41,23 @@ from common.config import ConfigError, Settings, load_settings
 from common.jsonl import append_jsonl
 from common.logging_utils import get_logger, to_iso, utc_now
 from llm.ollama_protocol import LLM_ENDPOINTS, OllamaResponseAssembler, extract_prompt
-from models.schemas import HEADER_RECEIVER, HEADER_REQUEST_ID, HEADER_SENDER, is_valid_request_id, new_request_id
+from models.schemas import (
+    HEADER_DECRYPTION,
+    HEADER_RECEIVER,
+    HEADER_REQUEST_ID,
+    HEADER_SENDER,
+    SecureLlmEnvelope,
+    is_valid_request_id,
+    new_request_id,
+)
+from pydantic import ValidationError
+from security.payload_crypto import ALGORITHM, PayloadCryptoError, decrypt_payload, encrypt_payload, key_id, load_key
 from server.api_server import make_listening_socket
 
 log = get_logger("gateway")
 
 PASS_THROUGH_GET = ("/api/tags", "/api/version")  # read-only Ollama endpoints, also logged
+SECURE_PREFIX = "/secure"  # Phase 3/4: /secure/api/generate, /secure/api/chat
 
 
 def _preview(text: str | None, limit: int = 70) -> str:
@@ -49,9 +67,11 @@ def _preview(text: str | None, limit: int = 70) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def create_gateway_app(settings: Settings) -> FastAPI:
+def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> FastAPI:
+    """app_key: Fernet key for the /secure endpoints. None = this gateway may not read them."""
     events_path = settings.log_dir / "server-events.jsonl"
     upstream_base = settings.ollama_url
+    own_key_id = key_id(app_key) if app_key else None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -67,7 +87,7 @@ def create_gateway_app(settings: Settings) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    async def proxy(request: Request, endpoint: str) -> Response:
+    async def proxy(request: Request, endpoint: str, secure: bool = False) -> Response:
         received_at = utc_now()
         started = time.perf_counter()
         header_rid = request.headers.get(HEADER_REQUEST_ID)
@@ -80,7 +100,19 @@ def create_gateway_app(settings: Settings) -> FastAPI:
 
         raw = await request.body()
         body: dict[str, Any] = {}
-        if raw:
+        security: dict[str, Any] = {}
+        envelope: SecureLlmEnvelope | None = None
+        if secure:
+            try:
+                envelope = SecureLlmEnvelope.model_validate_json(raw)
+            except ValidationError as exc:
+                return JSONResponse({"error": f"invalid secure envelope: {exc.errors()[:3]}"}, status_code=422,
+                                    headers=reply_headers)
+            request_id, sender = envelope.request_id, envelope.sender
+            reply_headers[HEADER_REQUEST_ID] = request_id
+            security = {"app_encryption": envelope.enc, "key_id": envelope.key_id,
+                        "ciphertext_bytes": len(envelope.ciphertext)}
+        elif raw:
             try:
                 parsed = json.loads(raw)
                 body = parsed if isinstance(parsed, dict) else {}
@@ -90,6 +122,7 @@ def create_gateway_app(settings: Settings) -> FastAPI:
         prompt = extract_prompt(endpoint, body) if is_llm else None
         model = body.get("model")
         stream = bool(body.get("stream", True)) if is_llm else False
+        upstream_content = raw or None
 
         log.info("REQUEST %s %s from=%s:%s request_id=%s sender=%s%s", request.method, endpoint, client_ip,
                  client_port, request_id, sender or "-",
@@ -132,6 +165,7 @@ def create_gateway_app(settings: Settings) -> FastAPI:
                 "payload": {"message": _preview(prompt, 200) if prompt else None, "sender": sender},
                 "llm": llm,
                 "error": error,
+                **security,  # Phase 3/4: app_encryption, key_id, ciphertext_bytes, decryption_status
             })
             if is_llm:
                 log.info('RESPONSE request_id=%s status=%s total=%.0fms ttft=%s tokens=%s tok/s=%s response="%s"%s',
@@ -142,10 +176,39 @@ def create_gateway_app(settings: Settings) -> FastAPI:
             else:
                 log.info("RESPONSE request_id=%s status=%s total=%.0fms", request_id, status, total_ms)
 
+        if secure:
+            assert envelope is not None
+            if app_key is None:
+                # Test C for the LLM: a relay without the key cannot even call Ollama.
+                security["decryption_status"] = "not_authorized"
+                reply_headers[HEADER_DECRYPTION] = "not_authorized"
+                write_record(403, None, "gateway holds no key: prompt not decrypted, Ollama not called")
+                return JSONResponse({"error": "this gateway is not authorized to decrypt the payload"},
+                                    status_code=403, headers=reply_headers)
+            try:
+                decrypted = decrypt_payload(envelope.ciphertext, app_key)
+                if not isinstance(decrypted, dict) or not decrypted.get("model"):
+                    raise PayloadCryptoError("decrypted payload is not an Ollama request (no 'model')")
+            except PayloadCryptoError as exc:
+                security["decryption_status"] = "failed"
+                reply_headers[HEADER_DECRYPTION] = "failed"
+                message = (f"payload decryption failed ({exc}); sender key_id={envelope.key_id}, "
+                           f"gateway key_id={own_key_id}")
+                write_record(400, None, message)
+                return JSONResponse({"error": message}, status_code=400, headers=reply_headers)
+            security["decryption_status"] = "authorized"
+            reply_headers[HEADER_DECRYPTION] = "authorized"
+            body = decrypted
+            prompt, model = extract_prompt(endpoint, body), body.get("model")
+            stream = bool(body.get("stream", True))
+            upstream_content = json.dumps(body).encode()
+            log.info('DECRYPTED request_id=%s key_id=%s model=%s stream=%s prompt="%s"', request_id,
+                     envelope.key_id, model, stream, _preview(prompt))
+
         client: httpx.AsyncClient = request.app.state.ollama
         upstream_request = client.build_request(
-            request.method, upstream_base + endpoint, content=raw or None,
-            headers={"Content-Type": "application/json"} if raw else None,
+            request.method, upstream_base + endpoint, content=upstream_content,
+            headers={"Content-Type": "application/json"} if upstream_content else None,
         )
         try:
             upstream = await client.send(upstream_request, stream=True)
@@ -156,15 +219,35 @@ def create_gateway_app(settings: Settings) -> FastAPI:
 
         assembler = OllamaResponseAssembler(endpoint) if is_llm else None
 
+        def sealed(line: bytes) -> bytes:
+            """One plaintext NDJSON line -> one encrypted NDJSON line (Phase 3/4)."""
+            assert app_key is not None
+            text = line.decode("utf-8", errors="replace")
+            if assembler:
+                assembler.feed_line(text, time.perf_counter())
+            token = encrypt_payload(json.loads(text), app_key)
+            return (json.dumps({"enc": ALGORITHM, "key_id": own_key_id, "ciphertext": token}) + "\n").encode()
+
         async def relay() -> AsyncIterator[bytes]:
             error: str | None = None
+            pending = b""
             try:
                 # Forward each piece as soon as it arrives: streaming must stay streaming.
                 async for chunk in upstream.aiter_raw():
+                    if secure:
+                        # Encrypt per complete line so the client can still stream-decrypt.
+                        pending += chunk
+                        *lines, pending = pending.split(b"\n")
+                        out = b"".join(sealed(line) for line in lines if line.strip())
+                        if out:
+                            yield out
+                        continue
                     if assembler:
                         assembler.feed_bytes(chunk, time.perf_counter())
                     yield chunk
-                if assembler:
+                if secure and pending.strip():
+                    yield sealed(pending)  # non-streaming answer: one JSON object without newline
+                if assembler and not secure:
                     assembler.close(time.perf_counter())
             except httpx.HTTPError as exc:
                 error = f"Ollama stream broke: {type(exc).__name__}: {exc}"
@@ -176,16 +259,18 @@ def create_gateway_app(settings: Settings) -> FastAPI:
                 await upstream.aclose()
                 write_record(upstream.status_code, assembler, error)
 
-        return StreamingResponse(relay(), status_code=upstream.status_code,
-                                 media_type=upstream.headers.get("content-type"), headers=reply_headers)
+        media_type = "application/x-ndjson" if secure else upstream.headers.get("content-type")
+        return StreamingResponse(relay(), status_code=upstream.status_code, media_type=media_type,
+                                 headers=reply_headers)
 
-    def route(endpoint: str) -> Any:
+    def route(endpoint: str, secure: bool = False) -> Any:
         async def handler(request: Request) -> Response:  # annotation tells FastAPI to inject the request
-            return await proxy(request, endpoint)
+            return await proxy(request, endpoint, secure)
         return handler
 
     for path in LLM_ENDPOINTS:
         app.add_api_route(path, route(path), methods=["POST"])
+        app.add_api_route(SECURE_PREFIX + path, route(path, secure=True), methods=["POST"])
     for path in PASS_THROUGH_GET:
         app.add_api_route(path, route(path), methods=["GET"])
     return app
@@ -202,6 +287,8 @@ def _parse_args(settings: Settings, argv: list[str] | None) -> argparse.Namespac
                         help="disable Nagle on client connections (default: on)")
     parser.add_argument("--keep-alive", type=int, default=settings.server_keep_alive,
                         help="idle keep-alive timeout in seconds (default: SERVER_KEEP_ALIVE_SECONDS)")
+    parser.add_argument("--app-decrypt", action=argparse.BooleanOptionalAction, default=True,
+                        help="decrypt /secure/* payloads with FERNET_KEY_FILE if available (default: on)")
     return parser.parse_args(argv)
 
 
@@ -235,7 +322,18 @@ def main(argv: list[str] | None = None) -> int:
              settings.ollama_url)
     log.info("GATEWAY tcp_nodelay=%s keep_alive=%ss timeout=%ss events -> %s", "on" if args.tcp_nodelay else "off",
              args.keep_alive, settings.llm_timeout, settings.log_dir / "server-events.jsonl")
-    config = uvicorn.Config(create_gateway_app(settings), host=args.host, port=args.port, log_level="warning",
+    app_key: bytes | None = None
+    if args.app_decrypt and (settings.fernet_key_file or os.getenv("FERNET_KEY")):
+        try:
+            app_key = load_key(settings.fernet_key_file)
+        except PayloadCryptoError as exc:
+            log.error("CONFIG ERROR %s (create one with scripts/make_fernet_key.py)", exc)
+            return 2
+    if app_key:
+        log.info("GATEWAY /secure/* payload decryption: AUTHORIZED key_id=%s", key_id(app_key))
+    else:
+        log.info("GATEWAY /secure/* payload decryption: none - encrypted prompts are refused with 403")
+    config = uvicorn.Config(create_gateway_app(settings, app_key), host=args.host, port=args.port, log_level="warning",
                             access_log=False, timeout_keep_alive=args.keep_alive, **tls_kwargs)  # type: ignore[arg-type]
     try:
         sockets = [make_listening_socket(args.host, args.port, tcp_nodelay=True)] if args.tcp_nodelay else None

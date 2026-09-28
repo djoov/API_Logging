@@ -5,7 +5,9 @@ import json
 import socket
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -13,14 +15,18 @@ import httpx
 import pytest
 import uvicorn
 
-from client.llm_client import send_prompt
+from client.llm_client import build_body, build_secure_envelope, send_prompt
 from client.traffic_generator import build_verify
 from common.config import Settings
 from gateway.ollama_gateway import create_gateway_app
 from llm.ollama_protocol import OllamaResponseAssembler, extract_prompt
+from models.schemas import new_request_id
 from observer.correlator import ExchangeCorrelator
+from security.payload_crypto import decrypt_payload, generate_key, key_id
 from security.tls_certs import create_ca, create_server_cert
 from tools.mock_ollama import create_app as create_mock_ollama
+
+GATEWAY_KEY = generate_key()
 
 
 # ---- protocol parsing --------------------------------------------------
@@ -84,8 +90,8 @@ def _serve(app: Any, port: int, **tls: str) -> tuple[uvicorn.Server, threading.T
     return server, thread
 
 
-@pytest.fixture
-def lab(settings: Settings, tmp_path: Path) -> Iterator[dict[str, Any]]:
+@contextmanager
+def _running_lab(settings: Settings, tmp_path: Path, app_key: bytes | None) -> Iterator[dict[str, Any]]:
     certs = tmp_path / "certs"
     create_ca(certs)
     create_server_cert(certs, certs, "gw", ["127.0.0.1"])
@@ -93,15 +99,31 @@ def lab(settings: Settings, tmp_path: Path) -> Iterator[dict[str, Any]]:
     gw_settings = replace(settings, node_name="windows", ollama_url=f"http://127.0.0.1:{ollama_port}",
                           llm_timeout=30.0)
     ollama = _serve(create_mock_ollama(token_delay_ms=1, load_ms=0), ollama_port)
-    gateway = _serve(create_gateway_app(gw_settings), gateway_port,
+    gateway = _serve(create_gateway_app(gw_settings, app_key), gateway_port,
                      ssl_certfile=str(certs / "gw.pem"), ssl_keyfile=str(certs / "gw.key"))
     target = f"https://127.0.0.1:{gateway_port}"
     client = httpx.Client(verify=build_verify(target, certs / "ca.pem"), timeout=30)
-    yield {"target": target, "client": client, "settings": gw_settings, "ollama_port": ollama_port}
-    client.close()
-    for server, thread in (gateway, ollama):
-        server.should_exit = True
-        thread.join(timeout=5)
+    try:
+        yield {"target": target, "client": client, "settings": gw_settings, "ollama_port": ollama_port}
+    finally:
+        client.close()
+        for server, thread in (gateway, ollama):
+            server.should_exit = True
+            thread.join(timeout=5)
+
+
+@pytest.fixture
+def lab(settings: Settings, tmp_path: Path) -> Iterator[dict[str, Any]]:
+    """Gateway WITHOUT a payload key (plain Phase 6, and Test C for /secure)."""
+    with _running_lab(settings, tmp_path, None) as running:
+        yield running
+
+
+@pytest.fixture
+def secure_lab(settings: Settings, tmp_path: Path) -> Iterator[dict[str, Any]]:
+    """Gateway holding the payload key: authorized decryption point (Test D)."""
+    with _running_lab(settings, tmp_path, GATEWAY_KEY) as running:
+        yield running
 
 
 def _gateway_records(settings: Settings) -> list[dict[str, Any]]:
@@ -160,3 +182,75 @@ def test_correlator_merges_llm_from_client_and_gateway() -> None:
     assert event["llm"]["prompt"] == "p" and event["llm"]["response"] == "full answer"
     assert event["llm"]["client_ttft_ms"] == 120.0 and event["llm"]["gateway_ttft_ms"] == 100.0
     assert event["evidence"] == ["client_log", "server_log"]
+
+
+# ---- Phase 3/4 on the Ollama gateway: /secure/api/generate|chat -----------
+
+@pytest.mark.parametrize("endpoint", ["/api/generate", "/api/chat"])
+@pytest.mark.parametrize("stream", [True, False])
+def test_secure_prompt_authorized_gateway(secure_lab: dict[str, Any], endpoint: str, stream: bool) -> None:
+    prompt = "Rahasia: jelaskan TLS"
+    result = send_prompt(secure_lab["client"], secure_lab["target"], endpoint, "mock-llm", prompt, stream,
+                         "kali", 1, app_key=GATEWAY_KEY)
+    assert result.ok, result.error
+    assert result.decryption_status == "authorized" and result.app_encryption == "fernet"
+    assert prompt in result.response and result.summary["response_tokens"]
+    assert result.encrypted_lines == (result.summary["chunks"] if stream else 1)
+
+    [record] = _gateway_records(secure_lab["settings"])
+    assert record["decryption_status"] == "authorized" and record["key_id"] == key_id(GATEWAY_KEY)
+    assert record["llm"]["prompt"] == prompt and record["llm"]["response"] == result.response
+    assert record["endpoint"] == endpoint and record["request_id"] == result.request_id
+
+
+def _raw_secure_post(lab: dict[str, Any], key: bytes, prompt: str = "isi rahasia", stream: bool = True) -> httpx.Response:
+    envelope = build_secure_envelope(build_body("/api/generate", "mock-llm", prompt, stream), new_request_id(),
+                                     "kali", 1, datetime.now(timezone.utc).isoformat(), key)
+    return lab["client"].post(lab["target"] + "/secure/api/generate", json=envelope)
+
+
+def test_secure_wire_never_carries_prompt_or_answer(secure_lab: dict[str, Any]) -> None:
+    envelope = build_secure_envelope(build_body("/api/generate", "mock-llm", "isi rahasia", True), new_request_id(),
+                                     "kali", 1, datetime.now(timezone.utc).isoformat(), GATEWAY_KEY)
+    assert "isi rahasia" not in json.dumps(envelope) and "mock-llm" not in json.dumps(envelope)
+    response = _raw_secure_post(secure_lab, GATEWAY_KEY)
+    assert response.status_code == 200 and "SIMULASI" not in response.text and "rahasia" not in response.text
+    first = json.loads(response.text.splitlines()[0])
+    assert set(first) == {"enc", "key_id", "ciphertext"}
+    assert "response" in decrypt_payload(first["ciphertext"], GATEWAY_KEY)
+
+
+def test_gateway_without_key_refuses_and_never_calls_ollama(lab: dict[str, Any]) -> None:
+    response = _raw_secure_post(lab, GATEWAY_KEY)
+    assert response.status_code == 403
+    assert response.headers["X-Decryption-Status"] == "not_authorized"
+    [record] = _gateway_records(lab["settings"])
+    assert record["decryption_status"] == "not_authorized" and record["llm"]["prompt"] is None
+    assert "rahasia" not in json.dumps(record)
+
+
+def test_wrong_key_is_rejected(secure_lab: dict[str, Any]) -> None:
+    response = _raw_secure_post(secure_lab, generate_key())
+    assert response.status_code == 400 and response.headers["X-Decryption-Status"] == "failed"
+    [record] = _gateway_records(secure_lab["settings"])
+    assert record["decryption_status"] == "failed" and record["llm"]["prompt"] is None
+
+
+def test_plain_endpoints_unchanged_on_gateway_with_key(secure_lab: dict[str, Any]) -> None:
+    result = send_prompt(secure_lab["client"], secure_lab["target"], "/api/generate", "mock-llm", "halo", True,
+                         "kali", 1)
+    assert result.ok and result.decryption_status is None
+    [record] = _gateway_records(secure_lab["settings"])
+    assert record.get("decryption_status") is None and record["llm"]["prompt"] == "halo"
+
+
+def test_per_line_encryption_coarsens_token_sizes(secure_lab: dict[str, Any]) -> None:
+    # Research check: plaintext NDJSON pieces differ by 1 byte per extra character (token-length
+    # side channel). Fernet (AES-CBC, 16-byte blocks) rounds each encrypted piece up, so an observer
+    # sees far fewer distinct sizes. It does NOT hide the number of pieces.
+    response = _raw_secure_post(secure_lab, GATEWAY_KEY, prompt="ukur ukuran potongan jawaban", stream=True)
+    lines = [line for line in response.text.splitlines() if line.strip()]
+    plaintext_sizes = [len(json.dumps(decrypt_payload(json.loads(l)["ciphertext"], GATEWAY_KEY))) for l in lines]
+    encrypted_sizes = [len(l) for l in lines]
+    assert len(set(encrypted_sizes)) < len(set(plaintext_sizes))
+    assert len(lines) == len(plaintext_sizes)  # piece count is still visible

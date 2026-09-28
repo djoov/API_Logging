@@ -441,7 +441,9 @@ Total **103 unit test** lulus (per 28-09). Semua bug observer (#8, #10–#13) pu
    dengan pengaturan Run D di kedua arah.
 2. **Mencari penyebab cold start** pada request pertama setelah server di-restart (terlihat di
    Windows dan Linux).
-3. **Enkripsi payload untuk traffic Ollama** (Fase 3/4 digabung dengan Fase 6).
+3. **Enkripsi payload untuk traffic Ollama**: sudah dibuat (`/secure/api/generate|chat`, README §18.8) dan diuji
+   dengan mock; hasil awal menunjukkan enkripsi per potongan membuat side channel panjang token lebih
+   kasar tetapi tidak hilang. Uji dengan `gemma3:4b` dan lintas host belum dilakukan.
 4. **Fase 5 untuk Ollama:** korelasi dua arah pada traffic LLM (saat ini Ollama hanya di Windows).
 5. **Fase 7 — analisis AI / deteksi anomali** di atas event JSONL, dan **Fase 8 — eBPF**.
 6. **Anomali ~76 ms** pada satu request Test E: gateway mengirim ServerHello dalam 1,8 ms, tetapi

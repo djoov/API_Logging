@@ -17,7 +17,7 @@ observability**, bukan monitoring CPU/GPU/RAM.
 | 3 | Enkripsi payload application-layer (Fernet) | C | selesai, lintas host dua arah | §17 |
 | 4 | Dekripsi sah + observability | D | selesai, lintas host dua arah | §17 |
 | 5 | Korelasi dua arah | F | selesai untuk API lab; belum untuk traffic Ollama | §9, §16 |
-| 6 | Workload Ollama asli lewat HTTPS gateway | E | lintas host Kali → Windows OK | §18 |
+| 6 | Workload Ollama asli lewat HTTPS gateway | E | lintas host Kali → Windows OK; + enkripsi payload (mock) | §18 |
 | 7 | Analisis AI / deteksi anomali | – | belum | – |
 | 8 | eBPF / telemetri jaringan lebih dalam | – | belum | – |
 
@@ -897,3 +897,50 @@ pertama pakai `llm.client_ttft_ms`.
   exchange terenkripsi tanpa log (sama seperti Fase 2).
 - Prompt dan jawaban disimpan **utuh** di `logs/` (disengaja untuk penelitian). `logs/` tidak di-commit;
   jangan pakai data sensitif sungguhan di luar lab.
+
+### 18.7 Hasil Ollama asli lintas host (Test E, 2026-09-28)
+Kali → gateway HTTPS Windows `https://192.168.56.1:8443` → Ollama 0.34.4 `gemma3:4b` di
+`127.0.0.1:11434`. Client Kali `--model gemma3:4b --count 3 --delay 7 --keep-alive 10`; observer di
+kedua host. 3/3 status 200, `capture_tls` + log aplikasi, `capture_match=4tuple_time` di kedua sisi.
+
+| request | client total (Kali) | wire total (Windows) | gateway total | Ollama total | client TTFT | gateway TTFT |
+|---|---|---|---|---|---|---|
+| `5627f2bd` | 5001 ms | 4989 | 4988 | 4981 | 1006 | 987 |
+| `f70ef466` | 8736 ms | 8732 | 8731 | 8725 | 1093 | 1086 |
+| `36a2ae3e` | 13276 ms | 13196 | 13195 | 13188 | 1430 | 1346 |
+
+- Hampir seluruh latency adalah waktu Ollama (`eval_duration`); gateway +6–7 ms, jaringan + TLS
+  4–12 ms. Uji langsung pertama hari itu: `load_duration` **43 s** (cold start model) untuk jawaban
+  4 token — pola "server tampak normal tetapi API lambat" dari POC awal.
+- Token-length side channel dengan model asli: 283 TLS record berukuran 116–128 B = 53+93+137
+  `response_tokens`, persis; ukuran record mengikuti panjang teks token.
+- `36a2ae3e` +80 ms: gateway mengirim ServerHello 1.8 ms setelah ClientHello, tetapi paket baru tiba
+  di Kali ~76 ms kemudian (jalur VirtualBox Host-Only/VM). Tidak terulang di uji berikutnya (§17.6).
+
+### 18.8 Enkripsi payload untuk traffic Ollama (Fase 3/4 + 6)
+Status 2026-09-28: **diimplementasikan dan diuji otomatis dengan mock Ollama** (112 test). Belum
+diuji dengan `gemma3:4b` maupun lintas host.
+
+- Path baru di gateway: `POST /secure/api/generate` dan `/secure/api/chat`. Envelope sama seperti
+  §17 (`request_id`, `sender`, `sequence`, `sent_at`, `enc`, `key_id` clear), tetapi **seluruh body
+  Ollama** (model, prompt/messages, options) ada di `ciphertext`.
+- Gateway **dengan** `FERNET_KEY_FILE` = titik dekripsi sah: dekripsi → panggil Ollama plaintext di
+  `127.0.0.1` → catat prompt + jawaban → **enkripsi ulang tiap baris NDJSON** jawaban
+  (`{"enc","key_id","ciphertext"}` per baris) supaya client tetap bisa menampilkan jawaban bertahap.
+  Header `X-Decryption-Status: authorized`.
+- Gateway **tanpa** kunci: **403** `not_authorized`, Ollama tidak dipanggil (LLM butuh plaintext, jadi
+  relay tanpa kunci tidak bisa melayani). Kunci salah/ciphertext diubah: **400** `failed`.
+- Client: `python client/llm_client.py --app-encrypt [--key-file secrets/fernet.key]`.
+- Endpoint lama `/api/generate` dan `/api/chat` tidak berubah.
+
+**Temuan (mock, satu jawaban 30 potongan):** ukuran tiap potongan di kabel
+
+| | nilai ukuran berbeda | yang bisa disimpulkan penyadap |
+|---|---|---|
+| panjang teks token sebenarnya | 9 (0–13 karakter) | – |
+| tanpa enkripsi payload (hanya TLS) | 10 (102–268 B) | panjang tiap token hampir persis |
+| dengan enkripsi per baris | **3** (266 / 290 / 482 B) | hanya kelompok: 266 B = token 4–5 kar., 290 B = 6–13 kar., 482 B = potongan statistik akhir |
+
+Fernet (AES-CBC, blok 16 byte) membulatkan ukuran sehingga side channel panjang token **menjadi
+kasar tetapi tidak hilang**; **jumlah potongan (≈ jumlah token) tetap terlihat persis**, dan ukuran
+di kabel naik ~2.5×. Angka ini dari teks mock (token = kata); perlu diulang dengan model asli.
