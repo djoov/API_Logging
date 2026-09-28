@@ -14,6 +14,44 @@ Format:
 
 ---
 
+## 2026-09-28 12:15 (WIB) — windows — Angka sisi Windows untuk uji Kali (mock 24-09 & TEST E 28-09)
+- Setelan gateway kedua uji: `--host 192.168.56.1 --port 8443`, `tcp_nodelay=on`,
+  `timeout_keep_alive=5 s`, `LLM_TIMEOUT_SECONDS=600`. Gateway tidak memaksa model (model dari
+  client). Uji 24-09 → mock Ollama; uji 28-09 → Ollama asli 0.34.4 (`gemma3:4b`), log di
+  `logs/test-e/` (Windows, tidak di-commit).
+- Observer Windows (Ethernet 2, `tcp port 8443`): semua 6 request_id ditemukan, semuanya
+  `direction=kali_to_windows`, `evidence=capture_tls,server_log`, `capture_match=4tuple_time`. Ukuran
+  request/response di capture Windows sama persis dengan capture Kali (mis. 410/7273, 408/12298, 444/17878).
+
+  **TEST E (Ollama asli), gabungan kedua host:**
+
+  | request_id | client_total (Kali) | wire_total (Win) | gateway_total | ollama_total | client TTFT | gateway TTFT | wire_ttfb (Win) | client−wire |
+  |---|---|---|---|---|---|---|---|---|
+  | `5627f2bd` | 5001 | 4989 | 4988 | 4981 | 1006 | 987 | 989 | 12 ms |
+  | `f70ef466` | 8736 | 8732 | 8731 | 8725 | 1093 | 1086 | 1087 | 4 ms |
+  | `36a2ae3e` | 13276 | 13196 | 13195 | 13188 | 1430 | 1346 | 1348 | **80 ms** |
+
+  (ms.) Urutan per lapisan konsisten: client ≥ wire ≥ gateway ≥ Ollama. Gateway menambah 6–7 ms di
+  atas Ollama; TTFT client − gateway = 7–19 ms untuk #1–#2.
+
+  **Mock (24-09):** gateway TTFT 559 / 33 / 34 ms, gateway_total 1484 / 994 / 957 ms (client Kali:
+  562/35/57 dan 1499/997/981) → selisih client−gateway 3–24 ms; #3 lebih besar karena handshake baru.
+- Keep-alive (dari capture Windows, record 19 B = close_notify gateway):
+  - 24-09: close_notify stream 3 pukul 21:42:22.513, client_hello baru 21:42:22.537 (24 ms) →
+    **race terkonfirmasi**, sesuai temuan Kali #2.
+  - 28-09: close_notify ~2 s *sebelum* tiap request berikutnya (11:54:04.479 → baru 11:54:06.593;
+    11:54:20.323 → 11:54:22.340). Delay 7 s > keep-alive 5 s → koneksi baru per request, tanpa race.
+- Terbuka: **80 ms ekstra pada `36a2ae3e`** terjadi *sebelum* request tiba di NIC Windows (TTFT dan
+  total sama-sama bergeser ~80–85 ms; sisi Windows normal). Bukan race keep-alive (close 2 s
+  sebelumnya). Penyebab belum diketahui dari data Windows.
+- Juga dicatat: Windows sempat memanggil `GET /api/tags` via gateway (11:52) untuk cek → 1 exchange
+  windows→windows di log gateway, bukan dari Kali.
+- Butuh dari kali: dari capture Kali untuk `36a2ae3e` (stream 2 di Kali): jarak `sent_at` →
+  client_hello → handshake selesai → record request pertama. Tujuannya menemukan di mana 80 ms itu.
+- Niat (tests/): perbaiki `test_tcp_nodelay_listener_reaches_accepted_connections` agar tidak
+  bergantung pada loop default (pakai `loop="asyncio"` di `uvicorn.Config`), supaya lulus juga di
+  Python Kali yang punya uvloop. Belum diubah; Kali jangan mengubah file itu dulu.
+
 ## 2026-09-28 11:55 (WIB) — kali — TEST E: Kali → gateway HTTPS → Ollama asli (gemma3:4b), 3/3 OK
 - Dilakukan: gateway `https://192.168.56.1:8443` sekarang meneruskan ke Ollama asli
   (`/api/version` = 0.34.4, `/api/tags` = `gemma3:4b` 4.3B Q4_K_M). Port 11434 tetap tertutup dari
