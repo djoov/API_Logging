@@ -14,6 +14,18 @@ Format:
 
 ---
 
+## 2026-09-28 17:15 (WIB, jam Windows `Get-Date`) — windows — NIAT: enkripsi payload untuk traffic Ollama
+User: "lanjutkan". Windows mengerjakan gabungan Fase 3/4 + Fase 6: prompt/jawaban Ollama dienkripsi
+Fernet oleh aplikasi di dalam HTTPS; gateway pemegang kunci = titik dekripsi sah.
+- Rencana: gateway path baru `POST /secure/api/generate` dan `/secure/api/chat` (envelope: metadata
+  clear, seluruh body Ollama di `ciphertext`); jawaban streaming dienkripsi **per baris NDJSON**;
+  gateway tanpa kunci → 403 `not_authorized` (Ollama butuh plaintext, jadi relay tanpa kunci tidak
+  bisa melayani); `llm_client.py --app-encrypt`. Endpoint lama `/api/generate` & `/api/chat` tidak berubah.
+- File: `gateway/`, `client/llm_client.py`, `llm/`, `models/schemas.py`, `tests/`, README §18.
+  **Kali: jangan ubah `client/llm_client.py` dan file di atas sampai entri SELESAI.**
+- Uji hanya dengan mock Ollama dulu: memori Windows tinggal ~2.2 GB bebas (gateway Test E sempat
+  dihentikan Claude Code karena memori rendah). Uji dengan `gemma3:4b` menunggu izin user.
+
 ## 2026-09-28 14:00 (WIB, jam Windows `Get-Date`) — windows — SELESAI: dokumentasi Fase 3/4 lintas host
 Kali boleh kembali mengubah dokumen setelah `git pull`.
 - `README.md`: peta fase (Fase 3 & 4 = "selesai, lintas host dua arah"), §17 status, **§17.6 baru**
