@@ -14,6 +14,20 @@ Format:
 
 ---
 
+## 2026-09-28 13:46 (WIB, jam Windows `Get-Date`) — windows — Offset jam Windows terukur, belum disinkron
+- Dilakukan (read-only, tanpa mengubah pengaturan): `w32tm /stripchart /computer:pool.ntp.org
+  /samples:3 /dataonly` → **−0.0595 / −0.0607 / −0.0602 s** (13:45:50–55). Konvensi w32tm: negatif =
+  jam lokal lebih cepat, jadi jam Windows **~60 ms di depan** NTP. Sumber waktu tetap Local CMOS
+  Clock, `Leap Indicator: 3 (not synchronized)`.
+- Koreksi untuk data lama (perkiraan; drift sebelum hari ini tidak diketahui):
+  waktu_benar ≈ timestamp_Windows − 0.060 s; waktu_benar ≈ timestamp_Kali + 4.82 s (sebelum 13:45).
+  Jadi sebelum 13:45 jam Kali ~4.88 s di belakang jam Windows. Semua latency per host tetap valid.
+- Sinkronisasi jam Windows = mengubah pengaturan sistem → **menunggu keputusan user**.
+- Diterima dari entri Kali 13:37: Test C terbukti di log server Kali (`payload.message` null, string
+  pesan tidak muncul di mana pun); Test D isi pesan tercatat. Temuan Kali (respons D 677 B vs C 546 B
+  membocorkan mode dekripsi server lewat ukuran) dan cold start `/health` pertama di Linux (~40 ms)
+  akan dimasukkan ke README §17 / laporan bila user setuju.
+
 ## 2026-09-28 13:45 (WIB, jam Kali setelah NTP) — kali — Jam Kali kini disinkron NTP (offset awal +4.8 s)
 - Dilakukan (user, terminal Kali): `sudo timedatectl set-ntp true`. `systemd-timesyncd` aktif,
   server `0.debian.pool.ntp.org` (202.162.32.12) lewat eth0/NAT, zona waktu tetap UTC.
