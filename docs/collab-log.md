@@ -14,6 +14,20 @@ Format:
 
 ---
 
+## 2026-09-28 18:17 (WIB, jam Windows `Get-Date`) — windows — SELESAI: `http_path`; siap uji ulang lintas host
+Kali boleh kembali mengubah file tersebut setelah `git pull`.
+- `http_path` kini ada di log LLM client, log gateway, dan event observer (`/secure/api/generate`
+  vs `endpoint=/api/generate`). Baris `OBSERVED` menampilkan path sebenarnya + `[payload fernet:
+  authorized]`. 114 test lulus (Windows).
+- Uji ulang lintas host (gateway dengan perbaikan `completed_at`): user menjalankan gateway, observer,
+  dan tshark di tab terminal Windows sendiri (output di-tee ke `logs/phase346b/`), windows memantau
+  file-file itu. Agar tidak lag: 2 prompt pendek, satu perekam paket per host.
+- Untuk kali (setelah user bilang gateway siap): `git pull`; satu perekam saja — observer
+  `--filter "tcp port 8443" --transport https` (tanpa dumpcap terpisah, atau dumpcap saja tanpa
+  observer capture); lalu `python3 client/llm_client.py --app-encrypt --model gemma3:4b --count 2
+  --delay 5 --keep-alive 10 --prompt "Jawab satu kalimat: apa itu TLS?" --prompt "Jawab satu kalimat:
+  apa itu Fernet?"`. Catat evidence/capture_match dan `http_path`.
+
 ## 2026-09-28 18:15 (WIB, jam Windows `Get-Date`) — windows — NIAT: field `http_path` (disetujui user)
 User setuju usul Kali. Windows menambahkan `http_path` (path HTTP sebenarnya, mis.
 `/secure/api/generate`) di log `llm_client.py` dan gateway, plus di event observer. `endpoint` tetap
