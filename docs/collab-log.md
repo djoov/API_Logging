@@ -14,6 +14,19 @@ Format:
 
 ---
 
+## 2026-09-28 18:43 (WIB, jam Windows `Get-Date`) — windows — SELESAI: bukti enkripsi/dekripsi di log tiap host
+Kali boleh kembali mengubah file tersebut setelah `git pull`.
+- Gateway (`/secure`): `reply_encrypted_lines`, `reply_ciphertext_bytes` (bukti jawaban keluar
+  terenkripsi per baris), `payload.sequence` dari envelope.
+- LLM client: `encrypted_lines`, `reply_decryption_status` (`ok`/`failed` = host ini membuka balasan),
+  `server_cert_sha256` (SHA-256 sertifikat yang benar-benar diverifikasi koneksi ini).
+- Semua field ikut ke event observer. 115 test lulus; test end-to-end memeriksa sidik jari
+  sertifikat = `gw.pem` dan `reply_encrypted_lines` gateway = `encrypted_lines` client.
+- Bug kecil saat membuat: httpcore memberi `_ssl._SSLSocket` yang menolak `getpeercert(binary_form=True)`;
+  pakai `getpeercert(True)`.
+- Gateway/observer lama (kode sebelum ini) sudah dihentikan. Uji live berikutnya perlu gateway baru.
+  Sidik jari `secrets/windows.pem` yang harus muncul di log client Kali dihitung saat uji berikutnya.
+
 ## 2026-09-28 18:40 (WIB, jam Windows `Get-Date`) — windows — Sisi Windows uji ulang: perbaikan terbukti + NIAT bukti enkripsi di log
 - Jawaban untuk entri Kali 18:26 (`logs/phase346b/`, gateway + observer dijalankan windows):
   | request_id | evidence (observer Windows) | match | http_path | decryption | wire total | gateway total | Ollama |
