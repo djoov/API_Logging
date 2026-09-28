@@ -14,6 +14,44 @@ Format:
 
 ---
 
+## 2026-09-28 17:46 (WIB, jam Kali NTP) — kali — Ollama terenkripsi lintas host (`/secure`, gemma3:4b): 3/3 authorized
+- Dilakukan: `git pull`; `pytest` → **112 passed** di Kali. pcap mentah `dumpcap -i eth1 -f "tcp port
+  8443"` → `logs/phase346-kali.pcapng` (2354 paket, 0 drop). Observer `--filter "tcp port 8443"
+  --transport https` (TLS idle 30 s, incomplete 900 s) → 4 event, lalu
+  `llm_client.py --app-encrypt --model gemma3:4b --count 3 --delay 5 --keep-alive 10`
+  (17:43:10–17:45:16 WIB).
+- SUMMARY: `planned=3 sent=3 ok=3 failed=0`, `ttft avg=1143ms | total avg=38483ms max=80562ms`.
+
+  | request_id | decryption | encrypted_lines | token p/r | TTFT | client_total | ollama_total | client−ollama | ciphertext B | bytes req/resp |
+  |---|---|---|---|---|---|---|---|---|---|
+  | `1cf42442` | authorized | 276 | 20/276 | 1296 ms | 24702 ms | 24593 ms | 109 ms | 204 | 708 / 86300 |
+  | `c79a25f4` | authorized | 116 | 20/116 | 1012 ms | 10185 ms | 10173 ms | 12 ms | 228 | 732 / 37260 |
+  | `65107368` | authorized | 766 | 23/766 | 1122 ms | 80562 ms | 80496 ms | 66 ms | 204 | 708 / 238073 |
+
+  Evidence ketiganya `capture_tls,client_log`, `capture_match=4tuple_time`; ditambah 1 capture-only
+  (`/health`, 246→174 B). Semua di **satu koneksi TCP** (stream 0), karena keep-alive 10 s di kedua sisi.
+- Record jawaban di pcap Kali (TLS app_data dari :8443, `tls.record.length`, dibagi per jendela
+  `sent_at`…`completed_at`):
+
+  | request_id | record | ukuran berbeda | 314 B | 290 B | lainnya (masing-masing 1×) |
+  |---|---|---|---|---|---|
+  | `1cf42442` | 278 | **5** | 145 | 130 | 260 (header), 2810 (baris `done`), 22 (terminator) |
+  | `c79a25f4` | 118 | **5** | 84 | 31 | 260, 1634, 22 |
+  | `65107368` | 768 | **5** | 397 | 368 | 260, 6435, 22 |
+
+  Record = `encrypted_lines` + 2, jadi jumlah token tetap terlihat persis. Setiap potongan token
+  hanya punya **2 ukuran** (290/314 B, blok AES-CBC Fernet setelah base64). Dari ukuran tersisa ~1 bit
+  per token (pendek/panjang), dibanding 13 ukuran (116–128 B) di TEST E tanpa enkripsi payload.
+  Record `done` (berisi `context`) masih tumbuh dengan total token: 2810 / 1634 / 6435 B. Ukuran di
+  kabel ~312 B/token vs ~137 B/token di TEST E (~2.3×). Keseluruhan pcap: 10 ukuran berbeda
+  (termasuk handshake/`/health`).
+- Temuan kecil: `endpoint` di log client (dan event observer Kali) = `/api/generate`, padahal path
+  HTTP sebenarnya `/secure/api/generate` (`client/llm_client.py:180` memakai `args.endpoint`, bukan
+  `path`). Status enkripsi tetap benar (`app_encryption=fernet`, `decryption_status=authorized`).
+- Niat (client/, milik Kali, belum diubah): catat path sebenarnya (atau tambahkan field
+  `http_path`) di log LLM client supaya event sama dengan log gateway. Menunggu keputusan user.
+  Tidak ada kode yang diubah di uji ini.
+
 ## 2026-09-28 17:39 (WIB, jam Windows `Get-Date`) — windows — `/secure` dengan gemma3:4b (1 mesin) OK; Kali silakan uji
 - **Koreksi:** judul entri SELESAI di bawah bertanda "17:45" padahal ditulis ± 17:30 — itu perkiraan,
   bukan `Get-Date`, melanggar janji di entri 12:52. Entri ini memakai `Get-Date`.
