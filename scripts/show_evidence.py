@@ -15,11 +15,13 @@ import argparse
 import json
 import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 SERVER_TYPES = ("server_exchange", "llm_gateway_exchange")
 CLIENT_TYPES = ("client_exchange", "llm_client_exchange")
+WINDOW_MARGIN_S = 5.0  # capture records this far before/after the shown requests still count
 
 
 def load(path: Path) -> list[dict[str, Any]]:
@@ -89,10 +91,33 @@ def describe(rid: str, server: dict | None, client: dict | None, event: dict | N
         lines.append(f"  prompt / message     : {short(prompt, limit)}")
     if llm.get("response"):
         lines.append(f"  answer               : {short(llm['response'], limit)}")
-    if llm:
+    if llm.get("api_style") == "openai":
+        rate = llm.get("tokens_per_s")
+        lines.append(f"  model timing         : not reported by the OpenAI API; tokens {llm.get('response_tokens')}, "
+                     + (f"~{rate} tok/s (estimated from arrival times)" if rate else "tok/s unknown (not streamed)"))
+    elif llm:
         lines.append(f"  model timing         : total {llm.get('ollama_total_ms')} ms, load {llm.get('ollama_load_ms')} ms, "
                      f"tokens {llm.get('response_tokens')}")
     return lines
+
+
+def _epoch(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def time_window(records: list[dict[str, Any]]) -> tuple[float, float] | None:
+    """Earliest start to latest end of the given log records, widened by WINDOW_MARGIN_S."""
+    starts = [t for r in records if (t := _epoch(r.get("received_at") or r.get("sent_at") or r.get("timestamp")))]
+    ends = [t for r in records if (t := _epoch(r.get("completed_at") or r.get("received_at") or r.get("sent_at")
+                                                or r.get("timestamp")))]
+    if not starts or not ends:
+        return None
+    return min(starts) - WINDOW_MARGIN_S, max(ends) + WINDOW_MARGIN_S
 
 
 def network_view(captures: list[dict[str, Any]], texts: list[str]) -> list[str]:
@@ -149,6 +174,17 @@ def main(argv: list[str] | None = None) -> int:
     rids.sort(key=when)
     if args.last:
         rids = rids[-args.last:]
+
+    # Network view only for the capture records around the requests shown (a log folder often holds
+    # many test runs). Logs and capture come from the same host, so their clocks agree.
+    window = time_window([servers.get(r) or clients.get(r) or events.get(r) or {} for r in rids])
+    if window and captures:
+        start, end = window
+        in_window = [c for c in captures
+                     if not isinstance(c.get("timestamp"), (int, float)) or start <= c["timestamp"] <= end]
+        print(f"(network view limited to {len(in_window)} of {len(captures)} capture records, "
+              f"the time span of the requests shown +/- {WINDOW_MARGIN_S:.0f} s)\n")
+        captures = in_window
 
     texts: list[str] = []
     for rid in rids:

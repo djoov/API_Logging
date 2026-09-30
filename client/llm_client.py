@@ -4,6 +4,7 @@
     python client/llm_client.py --prompts-file prompts.txt --count 3 --delay 5 --endpoint chat
     python client/llm_client.py --no-stream --model llama3.2
     python client/llm_client.py --app-encrypt           # Phase 3/4: whole Ollama request Fernet-encrypted
+    python client/llm_client.py --endpoint openai --model qwen/qwen3-vl-4b   # OpenAI API (LM Studio behind the gateway)
 
 Every exchange is written to logs/client-events.jsonl (record_type "llm_client_exchange") with the
 prompt, the complete answer (streamed pieces joined together), time to first token and total time.
@@ -38,6 +39,7 @@ from common.config import ConfigError, Settings, load_settings
 from common.jsonl import append_jsonl
 from common.logging_utils import get_logger, to_iso, utc_now
 from llm.ollama_protocol import OllamaResponseAssembler
+from llm.openai_protocol import OPENAI_CHAT, OpenAIResponseAssembler
 from models.schemas import (
     HEADER_DECRYPTION,
     HEADER_RECEIVER,
@@ -92,6 +94,11 @@ class LlmResult:
 
 
 def build_body(endpoint: str, model: str, prompt: str, stream: bool) -> dict[str, Any]:
+    if endpoint == OPENAI_CHAT:
+        body: dict[str, Any] = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": stream}
+        if stream:
+            body["stream_options"] = {"include_usage": True}  # otherwise a stream carries no token counts
+        return body
     if endpoint == "/api/chat":
         return {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": stream}
     return {"model": model, "prompt": prompt, "stream": stream}
@@ -108,7 +115,8 @@ def _open_line(line: str, app_key: bytes) -> str:
     """Decrypt one encrypted NDJSON line from the gateway; plain lines (gateway errors) pass through."""
     obj = json.loads(line)
     if isinstance(obj, dict) and obj.get("ciphertext"):
-        return json.dumps(decrypt_payload(obj["ciphertext"], app_key))
+        plain = decrypt_payload(obj["ciphertext"], app_key)
+        return plain if isinstance(plain, str) else json.dumps(plain)  # str: the SSE end marker "[DONE]"
     if isinstance(obj, dict) and "detail" in obj and "error" not in obj:
         return json.dumps({"error": str(obj["detail"])})
     return line
@@ -118,7 +126,7 @@ def send_prompt(client: httpx.Client, base_url: str, endpoint: str, model: str, 
                 sender: str, sequence: int, show: bool = False, app_key: bytes | None = None) -> LlmResult:
     result = LlmResult(sequence=sequence, request_id=new_request_id(), prompt=prompt, sent_at=to_iso(utc_now()))
     headers = {HEADER_REQUEST_ID: result.request_id, HEADER_SENDER: sender}
-    assembler = OllamaResponseAssembler(endpoint)
+    assembler = OpenAIResponseAssembler() if endpoint == OPENAI_CHAT else OllamaResponseAssembler(endpoint)
     body: dict[str, Any] = build_body(endpoint, model, prompt, stream)
     path = endpoint
     if app_key:
@@ -239,8 +247,9 @@ def parse_args(settings: Settings, argv: list[str] | None = None) -> argparse.Na
     parser = argparse.ArgumentParser(description="Send prompts to Ollama via the HTTPS gateway and log everything")
     parser.add_argument("--target", default=settings.llm_target_url,
                         help="gateway URL, e.g. https://192.168.56.1:8443 (default: LLM_TARGET_URL)")
-    parser.add_argument("--endpoint", choices=["generate", "chat"], default="generate",
-                        help="Ollama API: /api/generate (default) or /api/chat")
+    parser.add_argument("--endpoint", choices=["generate", "chat", "openai"], default="generate",
+                        help="Ollama API /api/generate (default) or /api/chat, or the OpenAI-compatible "
+                             "/v1/chat/completions (LM Studio, Ollama /v1)")
     parser.add_argument("--model", default=settings.llm_model, help="model name (default: LLM_MODEL)")
     parser.add_argument("--prompt", action="append", help="prompt text (repeatable)")
     parser.add_argument("--prompts-file", type=Path, help="text file, one prompt per line")
@@ -274,7 +283,7 @@ def parse_args(settings: Settings, argv: list[str] | None = None) -> argparse.Na
     if not re.match(NODE_NAME_PATTERN, args.sender.lower()):
         parser.error("--sender must be lowercase letters/digits/dash")
     args.sender = args.sender.lower()
-    args.endpoint = f"/api/{args.endpoint}"
+    args.endpoint = OPENAI_CHAT if args.endpoint == "openai" else f"/api/{args.endpoint}"
     return args
 
 

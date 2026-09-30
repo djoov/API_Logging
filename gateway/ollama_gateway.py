@@ -15,6 +15,10 @@ envelope whose ciphertext holds the whole Ollama request. With FERNET_KEY_FILE t
 authorized decryption point: it decrypts, calls Ollama in plaintext on 127.0.0.1, logs prompt and
 answer, and re-encrypts the answer line by line (each streamed NDJSON piece separately). Without a
 key it cannot call Ollama at all and answers 403 (decryption_status "not_authorized").
+
+OpenAI-compatible API (LM Studio, Ollama /v1): POST /v1/chat/completions (SSE streaming) and
+/secure/v1/chat/completions are relayed and logged the same way. Point the upstream at LM Studio:
+    python gateway/ollama_gateway.py --ollama-url http://127.0.0.1:1234
 """
 from __future__ import annotations
 
@@ -41,7 +45,9 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from common.config import ConfigError, Settings, load_settings
 from common.jsonl import append_jsonl
 from common.logging_utils import get_logger, to_iso, utc_now
+from llm import openai_protocol
 from llm.ollama_protocol import LLM_ENDPOINTS, OllamaResponseAssembler, extract_prompt
+from llm.openai_protocol import OPENAI_CHAT, OpenAIResponseAssembler
 from models.schemas import (
     HEADER_DECRYPTION,
     HEADER_RECEIVER,
@@ -57,8 +63,31 @@ from server.api_server import make_listening_socket
 
 log = get_logger("gateway")
 
-PASS_THROUGH_GET = ("/api/tags", "/api/version")  # read-only Ollama endpoints, also logged
-SECURE_PREFIX = "/secure"  # Phase 3/4: /secure/api/generate, /secure/api/chat
+PASS_THROUGH_GET = ("/api/tags", "/api/version", "/v1/models")  # read-only endpoints, also logged
+SECURE_PREFIX = "/secure"  # Phase 3/4: /secure/api/generate, /secure/api/chat, /secure/v1/chat/completions
+CHAT_ENDPOINTS = (*LLM_ENDPOINTS, OPENAI_CHAT)  # Ollama native + OpenAI-compatible (LM Studio, Ollama /v1)
+
+
+def _prompt(endpoint: str, body: dict[str, Any]) -> str | None:
+    return openai_protocol.extract_prompt(body) if endpoint == OPENAI_CHAT else extract_prompt(endpoint, body)
+
+
+def _stream_default(endpoint: str, body: dict[str, Any]) -> bool:
+    """Ollama streams unless told otherwise; the OpenAI API does not."""
+    return bool(body.get("stream", endpoint != OPENAI_CHAT))
+
+
+def _event_payload(line: str) -> Any:
+    """One upstream line -> the object to encrypt: an NDJSON object, an SSE event's data (a JSON
+    object or the string "[DONE]"), or None for an SSE comment."""
+    data = line.strip()
+    if data.startswith(":"):
+        return None
+    if data.startswith("data:"):
+        data = data[5:].strip()
+        if data == "[DONE]":
+            return data
+    return json.loads(data)
 
 
 def _preview(text: str | None, limit: int = 70) -> str:
@@ -119,17 +148,18 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
                 body = parsed if isinstance(parsed, dict) else {}
             except json.JSONDecodeError:
                 return JSONResponse({"error": "request body is not valid JSON"}, status_code=400, headers=reply_headers)
-        is_llm = endpoint in LLM_ENDPOINTS
-        prompt = extract_prompt(endpoint, body) if is_llm else None
+        is_llm = endpoint in CHAT_ENDPOINTS
+        prompt = _prompt(endpoint, body) if is_llm else None
         model = body.get("model")
-        stream = bool(body.get("stream", True)) if is_llm else False
+        stream = _stream_default(endpoint, body) if is_llm else False
         upstream_content = raw or None
 
         log.info("REQUEST %s %s from=%s:%s request_id=%s sender=%s%s", request.method, endpoint, client_ip,
                  client_port, request_id, sender or "-",
                  f' model={model} stream={stream} prompt="{_preview(prompt)}"' if is_llm else "")
 
-        def write_record(status: int, assembler: OllamaResponseAssembler | None, error: str | None,
+        def write_record(status: int, assembler: OllamaResponseAssembler | OpenAIResponseAssembler | None,
+                         error: str | None,
                          finished: tuple[float, datetime] | None = None) -> None:
             """finished = (perf_counter, UTC time) when the last byte was handed to the client.
 
@@ -199,7 +229,7 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
             try:
                 decrypted = decrypt_payload(envelope.ciphertext, app_key)
                 if not isinstance(decrypted, dict) or not decrypted.get("model"):
-                    raise PayloadCryptoError("decrypted payload is not an Ollama request (no 'model')")
+                    raise PayloadCryptoError("decrypted payload is not an LLM request (no 'model')")
             except PayloadCryptoError as exc:
                 security["decryption_status"] = "failed"
                 reply_headers[HEADER_DECRYPTION] = "failed"
@@ -210,8 +240,8 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
             security["decryption_status"] = "authorized"
             reply_headers[HEADER_DECRYPTION] = "authorized"
             body = decrypted
-            prompt, model = extract_prompt(endpoint, body), body.get("model")
-            stream = bool(body.get("stream", True))
+            prompt, model = _prompt(endpoint, body), body.get("model")
+            stream = _stream_default(endpoint, body)
             upstream_content = json.dumps(body).encode()
             log.info('DECRYPTED request_id=%s key_id=%s model=%s stream=%s prompt="%s"', request_id,
                      envelope.key_id, model, stream, _preview(prompt))
@@ -224,20 +254,36 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
         try:
             upstream = await client.send(upstream_request, stream=True)
         except httpx.HTTPError as exc:
-            error = f"Ollama unreachable at {upstream_base}: {type(exc).__name__}: {exc}"
+            error = f"LLM upstream (Ollama / LM Studio) unreachable at {upstream_base}: {type(exc).__name__}: {exc}"
             write_record(502, None, error)
             return JSONResponse({"error": error}, status_code=502, headers=reply_headers)
 
-        assembler = OllamaResponseAssembler(endpoint) if is_llm else None
+        assembler: OllamaResponseAssembler | OpenAIResponseAssembler | None = None
+        if endpoint == OPENAI_CHAT:
+            assembler = OpenAIResponseAssembler()
+        elif is_llm:
+            assembler = OllamaResponseAssembler(endpoint)
 
         def sealed(line: bytes) -> bytes:
-            """One plaintext NDJSON line -> one encrypted NDJSON line (Phase 3/4)."""
+            """One plaintext NDJSON line or SSE event -> one encrypted NDJSON line (Phase 3/4).
+
+            The reply of /secure/* is always NDJSON of envelopes, also for an OpenAI SSE upstream:
+            each envelope holds one event's data, so the client can still decrypt piece by piece.
+            """
             assert app_key is not None
             text = line.decode("utf-8", errors="replace")
+            payload = _event_payload(text)
+            if payload is None:
+                return b""
             if assembler:
                 assembler.feed_line(text, time.perf_counter())
-            token = encrypt_payload(json.loads(text), app_key)
+            token = encrypt_payload(payload, app_key)
             return (json.dumps({"enc": ALGORITHM, "key_id": own_key_id, "ciphertext": token}) + "\n").encode()
+
+        # Only a real stream is split into lines. A plain JSON body (non-streamed answer or error) may
+        # span several lines: LM Studio pretty-prints it.
+        upstream_type = upstream.headers.get("content-type", "")
+        line_stream = upstream_type.startswith(("application/x-ndjson", "text/event-stream"))
 
         async def relay() -> AsyncIterator[bytes]:
             error: str | None = None
@@ -246,11 +292,14 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
             try:
                 # Forward each piece as soon as it arrives: streaming must stay streaming.
                 async for chunk in upstream.aiter_raw():
+                    if secure and not line_stream:
+                        pending += chunk  # sealed as one piece after the loop
+                        continue
                     if secure:
                         # Encrypt per complete line so the client can still stream-decrypt.
                         pending += chunk
                         *lines, pending = pending.split(b"\n")
-                        sealed_lines = [sealed(line) for line in lines if line.strip()]
+                        sealed_lines = [s for s in (sealed(line) for line in lines if line.strip()) if s]
                         out = b"".join(sealed_lines)
                         # Evidence that the answer left this host encrypted, line by line.
                         security["reply_encrypted_lines"] = security.get("reply_encrypted_lines", 0) + len(sealed_lines)
@@ -263,8 +312,8 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
                         assembler.feed_bytes(chunk, time.perf_counter())
                     last_forward = (time.perf_counter(), utc_now())
                     yield chunk
-                if secure and pending.strip():
-                    out = sealed(pending)  # non-streaming answer: one JSON object without newline
+                if secure and pending.strip() and (out := sealed(pending)):
+                    # non-streamed answer: one JSON object, possibly over several lines
                     security["reply_encrypted_lines"] = security.get("reply_encrypted_lines", 0) + 1
                     security["reply_ciphertext_bytes"] = security.get("reply_ciphertext_bytes", 0) + len(out)
                     last_forward = (time.perf_counter(), utc_now())
@@ -290,7 +339,7 @@ def create_gateway_app(settings: Settings, app_key: bytes | None = None) -> Fast
             return await proxy(request, endpoint, secure)
         return handler
 
-    for path in LLM_ENDPOINTS:
+    for path in CHAT_ENDPOINTS:
         app.add_api_route(path, route(path), methods=["POST"])
         app.add_api_route(SECURE_PREFIX + path, route(path, secure=True), methods=["POST"])
     for path in PASS_THROUGH_GET:
@@ -302,7 +351,7 @@ def _parse_args(settings: Settings, argv: list[str] | None) -> argparse.Namespac
     parser = argparse.ArgumentParser(description="HTTPS gateway in front of Ollama that logs prompts and answers")
     parser.add_argument("--host", default=settings.gateway_host, help="bind address (default: GATEWAY_HOST)")
     parser.add_argument("--port", type=int, default=settings.gateway_port, help="bind port (default: GATEWAY_PORT, 8443)")
-    parser.add_argument("--ollama-url", default=settings.ollama_url, help="upstream Ollama (default: OLLAMA_URL)")
+    parser.add_argument("--ollama-url", default=settings.ollama_url, help="upstream Ollama, or LM Studio http://127.0.0.1:1234 (default: OLLAMA_URL)")
     parser.add_argument("--node-name", default=settings.node_name)
     # Nagle stays ON under Windows otherwise (see README section 16); streaming suffers most.
     parser.add_argument("--tcp-nodelay", action=argparse.BooleanOptionalAction, default=True,

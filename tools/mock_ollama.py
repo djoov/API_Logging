@@ -1,7 +1,8 @@
 """A stand-in for Ollama, for labs without a real model (e.g. a laptop without a GPU).
 
 It speaks the same HTTP API shape as Ollama for /api/generate, /api/chat, /api/tags and
-/api/version, including NDJSON streaming and the final statistics object (nanoseconds).
+/api/version, including NDJSON streaming and the final statistics object (nanoseconds), plus the
+OpenAI-compatible /v1/models and /v1/chat/completions (SSE streaming) that LM Studio serves.
 The "answer" is canned text built from the prompt; it is clearly marked as simulated.
 
     python tools/mock_ollama.py                       # 127.0.0.1:11434, like Ollama
@@ -23,9 +24,10 @@ if __package__ in (None, ""):
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from llm.ollama_protocol import extract_prompt
+from llm.openai_protocol import extract_prompt as openai_extract_prompt
 
 MOCK_MODELS = ("mock-llm", "mock-llm:latest")
 
@@ -116,6 +118,54 @@ def create_app(token_delay_ms: float = 30.0, load_ms: float = 500.0) -> FastAPI:
     @app.post("/api/chat")
     async def api_chat(request: Request) -> Any:
         return await generate(request, "/api/chat")
+
+    # OpenAI-compatible API, as served by LM Studio (port 1234) and Ollama under /v1.
+    @app.get("/v1/models")
+    async def v1_models() -> dict[str, Any]:
+        return {"object": "list", "data": [{"id": "mock-llm", "object": "model", "owned_by": "mock"}]}
+
+    @app.post("/v1/chat/completions")
+    async def v1_chat(request: Request) -> Any:
+        try:
+            body = json.loads(await request.body())
+        except json.JSONDecodeError:
+            return JSONResponse({"error": {"message": "invalid JSON", "type": "invalid_request_error"}}, status_code=400)
+        model = body.get("model", "")
+        if model not in MOCK_MODELS:
+            return JSONResponse({"error": {"message": f"model '{model}' not found", "type": "invalid_request_error"}},
+                                status_code=404)
+        prompt = openai_extract_prompt(body) or ""
+        tokens = _answer_tokens(prompt)
+        usage = {"prompt_tokens": max(1, len(prompt.split())), "completion_tokens": len(tokens),
+                 "total_tokens": max(1, len(prompt.split())) + len(tokens)}
+        base = {"id": "chatcmpl-mock", "created": int(time.time()), "model": model}
+        if not state["loaded"]:
+            await asyncio.sleep(load_ms / 1000)
+            state["loaded"] = True
+
+        if not body.get("stream", False):  # OpenAI default: one JSON answer
+            await asyncio.sleep(token_delay_ms * len(tokens) / 1000)
+            answer = base | {"object": "chat.completion", "usage": usage, "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "".join(tokens)}, "finish_reason": "stop"}]}
+            # Multi-line (pretty-printed) JSON, exactly like LM Studio: a newline is no message boundary.
+            return Response(json.dumps(answer, indent=2), media_type="application/json")
+
+        include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+
+        def event(obj: dict[str, Any]) -> bytes:
+            return f"data: {json.dumps(base | {'object': 'chat.completion.chunk'} | obj)}\n\n".encode()
+
+        async def events() -> AsyncIterator[bytes]:
+            yield event({"choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]})
+            for token in tokens:
+                await asyncio.sleep(token_delay_ms / 1000)
+                yield event({"choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}]})
+            yield event({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+            if include_usage:
+                yield event({"choices": [], "usage": usage})
+            yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream")
 
     return app
 

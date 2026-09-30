@@ -50,5 +50,21 @@ def test_plaintext_on_the_wire_is_flagged(tmp_path: Path, capsys: pytest.Capture
     assert "YES - plaintext on the wire!" in capsys.readouterr().out
 
 
+def test_network_view_only_covers_the_requests_shown(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # A log folder holds several test runs; the sizes of an old run must not be mixed in (Kali, 2026-09-28).
+    old, new = gateway_record("c" * 36, "uji lama sekali"), gateway_record("d" * 36, "uji baru sekali")
+    old["received_at"], old["completed_at"] = "2026-09-24T12:00:00Z", "2026-09-24T12:00:02Z"
+    new["received_at"], new["completed_at"] = "2026-09-28T12:00:00Z", "2026-09-28T12:00:02Z"
+    write(tmp_path / "server-events.jsonl", [old, new])
+    t_old, t_new = 1790251201.0, 1790596801.0  # epoch seconds inside each run
+    write(tmp_path / "capture-events.jsonl", [
+        {"kind": "tls_app_data", "src_port": 8443, "tls_bytes": 999, "timestamp": t_old},
+        {"kind": "tls_app_data", "src_port": 8443, "tls_bytes": 314, "timestamp": t_new},
+    ])
+    assert show_evidence.main([str(tmp_path), "--last", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "314 B x1" in out and "999 B" not in out and "limited to 1 of 2" in out
+
+
 def test_empty_folder(tmp_path: Path) -> None:
     assert show_evidence.main([str(tmp_path)]) == 1

@@ -17,7 +17,7 @@ observability**, bukan monitoring CPU/GPU/RAM.
 | 3 | Enkripsi payload application-layer (Fernet) | C | selesai, lintas host dua arah | §17 |
 | 4 | Dekripsi sah + observability | D | selesai, lintas host dua arah | §17 |
 | 5 | Korelasi dua arah | F | selesai untuk API lab; belum untuk traffic Ollama | §9, §16 |
-| 6 | Workload Ollama asli lewat HTTPS gateway | E | lintas host Kali → Windows OK; + enkripsi payload (mock) | §18 |
+| 6 | Workload Ollama asli lewat HTTPS gateway | E | lintas host Kali → Windows OK; + enkripsi payload; + API OpenAI (LM Studio) | §18 |
 | 7 | Analisis AI / deteksi anomali | – | belum | – |
 | 8 | eBPF / telemetri jaringan lebih dalam | – | belum | – |
 
@@ -820,7 +820,7 @@ pribadi, tidak keluar dari jaringan lokal.
 | File | Fungsi |
 |---|---|
 | `gateway/ollama_gateway.py` | HTTPS reverse proxy di depan Ollama; `POST /api/generate`, `POST /api/chat`, `GET /api/tags`, `GET /api/version`. Meneruskan streaming apa adanya, menyusun jawaban lengkap untuk log. `--tcp-nodelay` **aktif default** (lihat §16). |
-| `client/llm_client.py` | Kirim prompt (`--prompt`, `--prompts-file`), `--endpoint generate\|chat`, `--stream/--no-stream`, `--count`, `--delay`; jawaban tampil live di terminal. Tanpa retry otomatis. |
+| `client/llm_client.py` | Kirim prompt (`--prompt`, `--prompts-file`), `--endpoint generate\|chat\|openai` (§18.9), `--stream/--no-stream`, `--count`, `--delay`; jawaban tampil live di terminal. Tanpa retry otomatis. |
 | `llm/ollama_protocol.py` | Membaca format Ollama (NDJSON streaming / JSON tunggal) + statistik (`eval_count`, `load_duration`, …). |
 | `tools/mock_ollama.py` | Pengganti Ollama untuk lab tanpa model/GPU (laptop ini). Jawabannya teks tiruan bertanda `[SIMULASI mock-ollama]`. |
 | `scripts/run_llm_demo.ps1` | Smoke test satu mesin (mock + gateway + observer + client), opsi `-Capture`, `-NoStream`, `-RealOllama`. |
@@ -974,4 +974,54 @@ Catatan: `endpoint` di log dan event berisi endpoint Ollama (`/api/generate`), b
 TLS dan payload, apakah host ini mendekripsi (`authorized`), balasan dikirim/diterima terenkripsi
 (`reply_encrypted_lines` / `encrypted_lines`, `reply_decryption_status`), sidik jari sertifikat server,
 evidence observer — dan pemeriksaan apakah teks prompt/jawaban yang tercatat pernah muncul di capture
-(di Fase 1 HTTP: YES; dengan HTTPS/`/secure`: NO).
+(di Fase 1 HTTP: YES; dengan HTTPS/`/secure`: NO). Network view hanya memakai record capture dalam
+rentang waktu request yang ditampilkan (±5 s), supaya uji lama di folder yang sama tidak ikut terhitung.
+
+### 18.9 API kompatibel OpenAI: LM Studio dan Ollama `/v1`
+LM Studio (port 1234) tidak memakai API native Ollama (`/api/generate`), melainkan API gaya OpenAI.
+Gateway dan client kini mendukung keduanya, sehingga jalur observasinya sama (HTTPS gateway, log
+prompt/jawaban di kedua host, `request_id`, `/secure` + Fernet).
+
+| | Ollama native | OpenAI-compatible (LM Studio, Ollama `/v1`) |
+|---|---|---|
+| Endpoint | `POST /api/generate`, `/api/chat` | `POST /v1/chat/completions` (+ `GET /v1/models`) |
+| Default streaming | ya | **tidak** (harus `"stream": true`) |
+| Format stream | NDJSON (1 objek JSON per baris) | SSE: `data: {...}` per potongan, diakhiri `data: [DONE]` |
+| Jumlah token | di objek terakhir (`eval_count`) | `usage`; saat streaming hanya bila `stream_options.include_usage` (client mengirimnya) |
+| Waktu di sisi model | `load_duration`, `prompt_eval_duration`, `eval_duration` | **tidak ada** → cold start / waktu load tidak terlihat dari API |
+| tokens/s | dihitung dari `eval_duration` (akurat) | **perkiraan** dari waktu tiba potongan pertama–terakhir (termasuk jitter jaringan) |
+
+```
+python gateway/ollama_gateway.py --ollama-url http://127.0.0.1:1234     # gateway -> LM Studio
+python client/llm_client.py --endpoint openai --model qwen/qwen3-vl-4b --prompt "..."
+python client/llm_client.py --endpoint openai --model qwen/qwen3-vl-4b --app-encrypt   # /secure/v1/chat/completions
+```
+
+- Log memakai field yang sama; `llm.api_style = "openai"` dan field `ollama_*_ms` bernilai `null`.
+- `/secure/v1/chat/completions`: balasan tetap **NDJSON berisi envelope terenkripsi**, satu per event SSE
+  (isi envelope = data event; penanda akhir `"[DONE]"` juga terenkripsi). Di kabel tidak ada `data:`.
+- Model LM Studio ≠ model Ollama: perbandingan hanya adil bila model dan kuantisasinya sama.
+- Diuji otomatis dengan mock (`tools/mock_ollama.py` kini juga melayani `/v1/*`).
+
+**Uji live satu mesin (2026-10-01, Windows, gateway `127.0.0.1:8443` → LM Studio `qwen/qwen3-vl-4b`
+Q4_K_M, `logs/lmstudio1/`):** 6/6 OK setelah perbaikan di bawah.
+
+| request | path | stream | token | tok/s (perkiraan) | total gateway |
+|---|---|---|---|---|---|
+| `b726456f` | `/v1/chat/completions` | ya | 90 | 23.3 | 20031 ms (TTFT 16.2 s) |
+| `dfaf86e8` | `/v1/chat/completions` | ya | 38 | 24.0 | 2024 ms |
+| `11fa4b5a` | `/secure/v1/...` | ya | 35 | 25.9 | 1832 ms (37 baris terenkripsi) |
+| `38763c46` | `/secure/v1/...` | ya | 379 | 24.8 | 15739 ms (381 baris) |
+| `4af6b16f` | `/v1/chat/completions` | tidak | 40 | – | 1958 ms |
+| `d3439c1e` | `/secure/v1/...` | tidak | 47 | – | 2446 ms (1 baris) |
+
+- **Cold start tak terlihat dari API:** request pertama TTFT 16.2 s, berikutnya ~0.5 s. Dengan Ollama
+  native penyebabnya terbaca di `load_duration`; lewat API OpenAI hanya terlihat "lambat", tanpa alasan.
+- Jumlah baris terenkripsi = token + 2 (35 → 37, 379 → 381): jumlah token tetap terbaca dari jumlah
+  record, sama seperti di Ollama.
+- **Bug yang ditemukan uji live (sudah diperbaiki):** jawaban non-streaming LM Studio berupa JSON
+  *pretty-printed* (banyak baris). Parser membaca per baris → `invalid JSON`, dan jalur `/secure` akan
+  mengenkripsi potongan baris yang tidak valid. Sekarang: parser membaca body utuh bila bukan SSE, dan
+  gateway hanya memecah per baris bila `Content-Type` upstream memang stream (`application/x-ndjson` /
+  `text/event-stream`). Mock kini meniru JSON multi-baris; test gagal tanpa perbaikan (dicek).
+- Belum diuji: Ollama `/v1` asli, dan LM Studio lintas host.

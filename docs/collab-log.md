@@ -14,6 +14,18 @@ Format:
 
 ---
 
+## 2026-10-01 00:20 (WIB, jam Windows `Get-Date`) — windows — SELESAI: API OpenAI-compatible (LM Studio)
+- Dilakukan: `llm/openai_protocol.py` (SSE + JSON utuh), gateway `/v1/chat/completions`,
+  `/secure/v1/chat/completions`, `GET /v1/models`; mock `/v1/*`; **`client/llm_client.py`**:
+  `--endpoint openai` (+ `stream_options.include_usage` saat streaming; `_open_line` meneruskan string
+  `"[DONE]"`). Perilaku `generate`/`chat` tidak berubah. `show_evidence.py`: network view dibatasi ke
+  rentang waktu request yang ditampilkan (±5 s) — usul Kali 19:15. README §18.9.
+- Hasil: 128 test lulus. Live satu mesin → LM Studio `qwen/qwen3-vl-4b`: 6/6 OK (stream/non-stream,
+  plain/`/secure`), ~23–26 tok/s (perkiraan). Bug ditemukan live dan diperbaiki: LM Studio mengirim
+  jawaban non-stream sebagai JSON multi-baris (parser per baris gagal; `/secure` juga).
+- Kali boleh kembali mengubah `client/llm_client.py` setelah `git pull`.
+- Butuh dari kali: `git pull` lalu `python3 -m pytest` (harap 128 lulus di Python 3.14 + uvloop).
+
 ## 2026-09-28 20:37 (WIB, jam Windows `Get-Date`) — windows — NIAT: API OpenAI-compatible (LM Studio / Ollama `/v1`)
 - Rencana: dukungan `POST /v1/chat/completions` (SSE streaming) supaya LM Studio (port 1234) dan
   Ollama `/v1` bisa diamati lewat jalur yang sama. File: `llm/openai_protocol.py` (baru),

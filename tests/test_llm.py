@@ -22,6 +22,8 @@ from client.traffic_generator import build_verify
 from common.config import Settings
 from gateway.ollama_gateway import create_gateway_app
 from llm.ollama_protocol import OllamaResponseAssembler, extract_prompt
+from llm.openai_protocol import OPENAI_CHAT, OpenAIResponseAssembler
+from llm.openai_protocol import extract_prompt as openai_extract_prompt
 from models.schemas import new_request_id
 from observer.correlator import ExchangeCorrelator
 from security.payload_crypto import decrypt_payload, generate_key, key_id
@@ -167,7 +169,7 @@ def test_gateway_reports_ollama_down(settings: Settings) -> None:
     down = replace(settings, ollama_url=f"http://127.0.0.1:{_free_port()}", llm_timeout=5.0)
     with TestClient(create_gateway_app(down)) as client:
         response = client.post("/api/generate", json={"model": "m", "prompt": "p"})
-    assert response.status_code == 502 and "Ollama unreachable" in response.json()["error"]
+    assert response.status_code == 502 and "unreachable at" in response.json()["error"]
     [record] = _gateway_records(down)
     assert record["status_code"] == 502 and record["llm"]["prompt"] == "p"
 
@@ -324,3 +326,106 @@ def test_correlator_carries_encryption_evidence_from_both_logs() -> None:
     assert event["reply_encrypted_lines"] == event["encrypted_lines"] == 26
     assert event["reply_decryption_status"] == "ok" and event["reply_ciphertext_bytes"] == 7000
     assert event["server_cert_sha256"] == "ab" * 32
+
+
+# ---- OpenAI-compatible API (LM Studio, Ollama /v1): /v1/chat/completions ----
+
+def test_openai_assembler_sse_split_across_chunks() -> None:
+    def event(obj: dict[str, Any]) -> str:
+        return f"data: {json.dumps(obj)}\n\n"
+    raw = (": keep-alive comment\n\n"
+           + event({"model": "m", "choices": [{"delta": {"role": "assistant", "content": ""}, "finish_reason": None}]})
+           + event({"model": "m", "choices": [{"delta": {"content": "Hal"}, "finish_reason": None}]})
+           + event({"model": "m", "choices": [{"delta": {"content": "o"}, "finish_reason": "stop"}]})
+           + event({"model": "m", "choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 5}})
+           + "data: [DONE]\n\n").encode()
+    asm = OpenAIResponseAssembler()
+    for i in range(0, len(raw), 9):
+        asm.feed_bytes(raw[i:i + 9], at=float(i))
+    asm.close(at=999.0)
+    s = asm.summary()
+    assert asm.text == "Halo" and asm.done and asm.error is None
+    assert s["api_style"] == "openai" and s["model"] == "m" and s["done_reason"] == "stop"
+    assert s["prompt_tokens"] == 3 and s["response_tokens"] == 5
+    assert s["ollama_load_ms"] is None  # the OpenAI API reports no model-side timings
+    assert s["tokens_per_s"] == round(4 / (asm.last_chunk_at - asm.first_chunk_at), 2)
+
+
+def test_openai_assembler_non_stream_and_error() -> None:
+    asm = OpenAIResponseAssembler()
+    asm.feed_bytes(json.dumps({"model": "m", "usage": {"completion_tokens": 2}, "choices": [
+        {"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}).encode(), 1.0)
+    asm.close(2.0)
+    assert asm.text == "ok" and asm.summary()["done"] and asm.summary()["tokens_per_s"] is None
+
+    # LM Studio pretty-prints a non-streamed answer over many lines (found live, 2026-10-01).
+    pretty = json.dumps({"model": "qwen/qwen3-vl-4b", "usage": {"completion_tokens": 3}, "choices": [
+        {"message": {"role": "assistant", "content": "API adalah\nantarmuka."}, "finish_reason": "stop"}]}, indent=2)
+    lm = OpenAIResponseAssembler()
+    for i in range(0, len(pretty), 5):
+        lm.feed_bytes(pretty[i:i + 5].encode(), float(i))
+    lm.close(999.0)
+    assert lm.error is None and lm.text == "API adalah\nantarmuka." and lm.summary()["response_tokens"] == 3
+
+    err = OpenAIResponseAssembler()
+    err.feed_bytes(b'{"error": {"message": "model \'x\' not found", "type": "invalid_request_error"}}', 1.0)
+    err.close(1.0)
+    assert err.summary()["error"] == "model 'x' not found"
+    assert openai_extract_prompt({"messages": [{"role": "user", "content": [
+        {"type": "text", "text": "apa ini?"}, {"type": "image_url", "image_url": {"url": "data:..."}}]}]}) == "apa ini?"
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_openai_prompt_and_answer_logged_on_both_sides(lab: dict[str, Any], stream: bool) -> None:
+    prompt = "Jelaskan TLS handshake"
+    result = send_prompt(lab["client"], lab["target"], OPENAI_CHAT, "mock-llm", prompt, stream, "kali", 1)
+    assert result.ok, result.error
+    assert "SIMULASI mock-ollama" in result.response and prompt in result.response
+    assert result.summary["api_style"] == "openai" and result.summary["response_tokens"]  # usage, also when streaming
+    assert result.summary["done"] and result.ttft_ms is not None
+
+    [record] = _gateway_records(lab["settings"])
+    assert record["endpoint"] == record["http_path"] == OPENAI_CHAT
+    assert record["llm"]["prompt"] == prompt and record["llm"]["response"] == result.response
+    assert record["llm"]["stream"] is stream and record["llm"]["api_style"] == "openai"
+    assert record["llm"]["response_tokens"] == result.summary["response_tokens"]
+
+
+def test_openai_stream_defaults_to_off(lab: dict[str, Any]) -> None:
+    # The OpenAI API does not stream unless asked; the gateway must log that correctly.
+    response = lab["client"].post(lab["target"] + OPENAI_CHAT,
+                                  json={"model": "mock-llm", "messages": [{"role": "user", "content": "hai"}]})
+    assert response.status_code == 200 and response.json()["choices"][0]["message"]["content"]
+    [record] = _gateway_records(lab["settings"])
+    assert record["llm"]["stream"] is False and record["llm"]["prompt"] == "hai"
+
+
+def test_openai_models_pass_through(lab: dict[str, Any]) -> None:
+    response = lab["client"].get(lab["target"] + "/v1/models")
+    assert response.status_code == 200 and response.json()["data"][0]["id"] == "mock-llm"
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_openai_secure_prompt_authorized_gateway(secure_lab: dict[str, Any], stream: bool) -> None:
+    prompt = "Rahasia lewat API OpenAI"
+    result = send_prompt(secure_lab["client"], secure_lab["target"], OPENAI_CHAT, "mock-llm", prompt, stream,
+                         "kali", 1, app_key=GATEWAY_KEY)
+    assert result.ok, result.error
+    assert result.decryption_status == "authorized" and result.reply_decryption_status == "ok"
+    assert prompt in result.response and result.summary["done"] and result.summary["response_tokens"]
+
+    [record] = _gateway_records(secure_lab["settings"])
+    assert record["http_path"] == "/secure" + OPENAI_CHAT and record["endpoint"] == OPENAI_CHAT
+    assert record["llm"]["prompt"] == prompt and record["llm"]["response"] == result.response
+    assert record["reply_encrypted_lines"] == result.encrypted_lines > (2 if stream else 0)
+
+
+def test_openai_secure_wire_has_no_sse_plaintext(secure_lab: dict[str, Any]) -> None:
+    body = build_body(OPENAI_CHAT, "mock-llm", "isi rahasia", True)
+    envelope = build_secure_envelope(body, new_request_id(), "kali", 1, datetime.now(timezone.utc).isoformat(),
+                                     GATEWAY_KEY)
+    response = secure_lab["client"].post(secure_lab["target"] + "/secure" + OPENAI_CHAT, json=envelope)
+    assert response.status_code == 200 and response.headers["content-type"].startswith("application/x-ndjson")
+    assert "data:" not in response.text and "SIMULASI" not in response.text and "rahasia" not in response.text
+    opened = [decrypt_payload(json.loads(line)["ciphertext"], GATEWAY_KEY) for line in response.text.splitlines()]
+    assert opened[-1] == "[DONE]" and opened[-2]["usage"]["completion_tokens"] > 0
