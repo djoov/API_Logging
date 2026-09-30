@@ -42,6 +42,7 @@ observability**, bukan monitoring CPU/GPU/RAM.
 16. [Eksperimen transport (Run A–D)](#16-eksperimen-transport-jeda-40-ms-dan-koneksi-baru-per-request)
 17. [Fase 3 & 4: enkripsi payload + dekripsi sah](#17-fase-3--4-enkripsi-payload-fernet--dekripsi-sah)
 18. [Fase 6: Ollama lewat HTTPS gateway](#18-fase-6-ollama-lewat-https-gateway-prompt--jawaban-di-kedua-host)
+19. [Migrasi ke PC Windows + PC Ubuntu](#19-migrasi-ke-pc-windows--pc-ubuntu-satu-lan)
 
 Cerita lengkap proyek ini — tahap, masalah, dan solusinya, dengan istilah teknis yang dijelaskan
 dalam bahasa sederhana: [`docs/laporan-perjalanan.md`](docs/laporan-perjalanan.md).
@@ -1025,3 +1026,105 @@ Q4_K_M, `logs/lmstudio1/`):** 6/6 OK setelah perbaikan di bawah.
   gateway hanya memecah per baris bila `Content-Type` upstream memang stream (`application/x-ndjson` /
   `text/event-stream`). Mock kini meniru JSON multi-baris; test gagal tanpa perbaikan (dicek).
 - Belum diuji: Ollama `/v1` asli, dan LM Studio lintas host.
+
+---
+
+## 19. Migrasi ke PC Windows + PC Ubuntu (satu LAN)
+Kodenya tidak perlu diubah: semua alamat, sertifikat, dan kunci dibaca dari `.env` dan `secrets/`.
+Yang berubah hanya konfigurasi. Peran tetap sama: **PC Windows** = gateway + Ollama/LM Studio (dulu
+laptop), **PC Ubuntu** = client (dulu VM Kali). Di bawah, `<IP_WIN>` dan `<IP_UBU>` = IP LAN kedua PC.
+
+### 19.1 Sebelum mulai
+- **IP tetap**: buat *DHCP reservation* di router (atau IP statis). IP masuk ke sertifikat; bila IP
+  berubah, sertifikat harus dibuat ulang.
+- **Jaringan pribadi saja** (rumah/lab), bukan Wi-Fi publik. Lebih baik kabel LAN: Wi-Fi membuat
+  latency lebih acak sehingga angka tidak bisa dibandingkan langsung dengan hasil VM.
+- Cek kedua PC saling terlihat: `ping <IP_UBU>` dari Windows dan `ping <IP_WIN>` dari Ubuntu (ping
+  Windows bisa diblok firewall; itu tidak masalah selama port 8443 nanti bisa diakses).
+
+### 19.2 PC Windows
+```powershell
+git clone https://github.com/djoov/API_Logging.git; cd API_Logging
+# Miniconda + Wireshark (centang Npcap) terpasang lebih dulu
+powershell -ExecutionPolicy Bypass -File scripts\setup_windows.ps1        # conda env + .env
+conda activate api-observability; python -m pytest                        # harus lulus semua
+python scripts/make_certs.py ca                                           # CA baru, ca.key TIDAK pernah keluar dari PC ini
+python scripts/make_certs.py server --name windows --ip <IP_WIN> --ip 127.0.0.1 --dns localhost
+python scripts/make_certs.py server --name ubuntu  --ip <IP_UBU>          # untuk arah Windows -> Ubuntu (Test A-D)
+python scripts/make_fernet_key.py; python scripts/make_fernet_key.py --show   # catat key_id
+# PowerShell Administrator, di folder project: izinkan HANYA IP Ubuntu
+powershell -ExecutionPolicy Bypass -File scripts\setup_windows.ps1 -AddFirewallRule -Port 8443 -RemoteAddress <IP_UBU>
+powershell -ExecutionPolicy Bypass -File scripts\setup_windows.ps1 -AddFirewallRule -Port 8000 -RemoteAddress <IP_UBU>
+python observer/observer.py --list-interfaces                             # pilih adapter LAN
+```
+`.env` Windows (komentar selalu di baris sendiri):
+```ini
+NODE_NAME=windows
+TARGET_HOST=<IP_UBU>
+TARGET_SCHEME=https
+TLS_CERT_FILE=secrets/windows.pem
+TLS_KEY_FILE=secrets/windows.key
+TLS_CA_FILE=secrets/ca.pem
+FERNET_KEY_FILE=secrets/fernet.key
+OBSERVER_INTERFACE=<nama adapter LAN dari --list-interfaces>
+PEER_NAMES=<IP_WIN>=windows,<IP_UBU>=ubuntu
+OLLAMA_URL=http://127.0.0.1:11434
+GATEWAY_HOST=<IP_WIN>
+GATEWAY_PORT=8443
+OBSERVER_TLS_IDLE_SECONDS=30
+OBSERVER_INCOMPLETE_TIMEOUT_SECONDS=900
+```
+Ollama: pasang, `ollama pull gemma3:4b` (atau model lain), dan **biarkan di 127.0.0.1** — jangan set
+`OLLAMA_HOST=0.0.0.0`. Untuk LM Studio: `--ollama-url http://127.0.0.1:1234` (§18.9).
+
+### 19.3 PC Ubuntu
+```bash
+sudo apt update && sudo apt install -y git tshark tcpdump openssh-server   # tshark: jawab "Yes" untuk non-root capture
+git clone https://github.com/djoov/API_Logging.git && cd API_Logging
+bash scripts/setup_linux.sh 8000 ubuntu      # cek sistem, buat .env (NODE_NAME=ubuntu), conda env bila ada
+# tanpa conda:  sudo apt install -y python3-venv && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+sudo usermod -aG wireshark "$USER"           # lalu logout/login
+python -m pytest                             # harus lulus semua
+mkdir -p secrets
+```
+Salin kunci dari PC Windows **lewat LAN** (PowerShell di Windows; `openssh-server` di Ubuntu):
+```powershell
+scp secrets\ca.pem secrets\ubuntu.pem secrets\ubuntu.key secrets\fernet.key <user>@<IP_UBU>:~/API_Logging/secrets/
+```
+Di Ubuntu: `chmod 600 secrets/*.key`. **Jangan** menyalin `ca.key`.
+
+`.env` Ubuntu:
+```ini
+NODE_NAME=ubuntu
+TARGET_HOST=<IP_WIN>
+TARGET_SCHEME=https
+TLS_CERT_FILE=secrets/ubuntu.pem
+TLS_KEY_FILE=secrets/ubuntu.key
+TLS_CA_FILE=secrets/ca.pem
+FERNET_KEY_FILE=secrets/fernet.key
+OBSERVER_INTERFACE=<mis. enp3s0, dari ip -brief addr>
+PEER_NAMES=<IP_WIN>=windows,<IP_UBU>=ubuntu
+LLM_TARGET_URL=https://<IP_WIN>:8443
+LLM_MODEL=gemma3:4b
+OBSERVER_TLS_IDLE_SECONDS=30
+OBSERVER_INCOMPLETE_TIMEOUT_SECONDS=900
+```
+`ufw` Ubuntu biasanya tidak aktif. Bila aktif: `sudo ufw allow from <IP_WIN> to any port 8000 proto tcp`.
+Jam: `timedatectl` harus menunjukkan `NTP synchronized: yes` (Windows: sinkron ke `pool.ntp.org`).
+
+### 19.4 Urutan uji ulang di lab baru
+Lab baru = ulangi test matrix; jangan langsung memakai angka lama.
+
+| Uji | Perintah inti (observer jalan dulu di kedua host, tunggu "Capturing on") |
+|---|---|
+| A HTTP | salin `.env` ke `config/http.env`, hapus nilai `TLS_*` dan set `TARGET_SCHEME=http`; jalankan server dan `python client/traffic_generator.py --count 5` dengan `ENV_FILE=config/http.env` (PowerShell: `$env:ENV_FILE="config/http.env"`), dua arah |
+| B HTTPS | `.env` seperti di atas; server `python server/api_server.py`, generator dua arah |
+| C / D | generator `--app-encrypt`; server `--no-app-decrypt` (C: `not_authorized`) lalu dengan kunci (D: `authorized`) |
+| E Ollama | Windows: `python gateway/ollama_gateway.py`; Ubuntu: `python client/llm_client.py --count 3 --delay 5 --keep-alive 10` (+ `--app-encrypt`) |
+| F | korelasi dua arah dari log observer kedua host (`scripts/show_evidence.py <folder>`) |
+
+Filter capture di LAN (ada traffic lain): `python observer/observer.py --filter "host <IP_LAWAN> and tcp port 8443"`.
+
+### 19.5 Yang belum pernah diuji di lingkungan ini
+LAN fisik (switch/router sungguhan), Ubuntu sebagai client, dan GPU PC Windows. Laporkan hasilnya
+apa adanya di `docs/collab-log.md`, termasuk bila ada angka yang berbeda jauh dari hasil VM.

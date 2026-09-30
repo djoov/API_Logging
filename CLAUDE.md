@@ -32,8 +32,11 @@ sampai habis sebelum mulai. Bahasa komunikasi dengan user: **Bahasa Indonesia**.
 | Capture | TShark (tidak di PATH; observer menemukannya), interface `\Device\NPF_{31A40843-...}` = Ethernet 2 | TShark/tcpdump di `eth1` (user di grup `wireshark` atau pakai sudo) |
 | Firewall | rule "API Observability Lab TCP 8000" (hanya `Ethernet 2`) ada; rule TCP 8443 untuk gateway **belum dibuat** per 2026-09-24 (butuh Administrator, README §18.2) | tidak ada firewall aktif |
 
-Target berikutnya (bukan VM): **PC Windows (Ollama asli) + PC Ubuntu (client)** di satu LAN — lihat
-README §18.3.
+Target berikutnya (bukan VM): **PC Windows (Ollama asli) + PC Ubuntu (client)** di satu LAN — panduan
+lengkap README **§19** (per 2026-10-01 kode siap; migrasi belum dilakukan). Setelah migrasi: PC Ubuntu
+mengambil peran dan kepemilikan file sesi Kali (`client/`, `scripts/*.sh`), `NODE_NAME=ubuntu`, setup
+dengan `bash scripts/setup_linux.sh 8000 ubuntu`; CA baru dibuat di PC Windows (`ca.key` tetap di sana).
+Perbarui tabel topologi di atas dengan IP LAN, nama adapter, dan path project yang sebenarnya.
 
 Environment Python: conda env **`api-observability`** (`environment.yml`). Test: `python -m pytest`.
 
@@ -46,7 +49,7 @@ Environment Python: conda env **`api-observability`** (`environment.yml`). Test:
 | 3 | Enkripsi payload application-layer (Fernet), `POST /api/secure-test`, `--app-encrypt` | C | selesai: 1 mesin + lintas host dua arah 9/9 (2026-09-28), README §17.6 |
 | 4 | Dekripsi sah: server dengan `FERNET_KEY_FILE` = `authorized`, tanpa = `not_authorized` | D | selesai: lintas host dua arah (2026-09-28); kunci `key_id=80dacc3b5d23` di kedua host |
 | 5 | Korelasi dua arah | F | selesai untuk API lab (HTTP/HTTPS); belum untuk traffic Ollama |
-| 6 | Workload Ollama asli lewat HTTPS gateway (+ `/secure/api/*` enkripsi payload, README §18.8) | E | lintas host Kali → Windows `gemma3:4b` OK 3/3; jalur `/secure` baru diuji dengan mock (2026-09-28) |
+| 6 | Workload Ollama asli lewat HTTPS gateway (+ `/secure/api/*` enkripsi payload, README §18.8; API OpenAI/LM Studio §18.9) | E | lintas host Kali → Windows `gemma3:4b` OK, plain dan `/secure` (2026-09-28); LM Studio `qwen/qwen3-vl-4b` satu mesin 6/6 (2026-10-01) |
 | 7 | Analisis AI / deteksi anomali | – | belum |
 | 8 | Observability lebih dalam (eBPF / telemetri jaringan) | – | belum |
 | – | Perbandingan ulang Fase 1 vs 2 dengan setelan Run D | – | ditunda user |
@@ -71,6 +74,10 @@ sederhana dengan istilah teknis), `docs/collab-log.md` (log kerja bersama dua se
 11. Jam antar host: per 2026-09-28 Kali (NTP, sebelumnya −4.82 s) dan Windows (`pool.ntp.org`,
     sebelumnya +60–100 ms) sudah disinkron, tetapi lewat Wi-Fi publik ketelitiannya hanya puluhan ms.
     Jangan menghitung latency dari timestamp dua host; ukur durasi di dalam satu host.
+12. LM Studio mengirim jawaban non-streaming sebagai JSON multi-baris: jangan memecah body per baris
+    kecuali `Content-Type` memang stream (NDJSON/SSE). Mock meniru ini.
+13. Laporan `.docx` di root project milik user, **tidak boleh di-commit/push** (dikecualikan lewat
+    `.git/info/exclude` di Windows).
 
 ## Cara bekerja bersama (dua sesi)
 - Koordinasi lewat **git** + **`docs/collab-log.md`**. Mulai setiap sesi dengan `git pull`, baca

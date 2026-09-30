@@ -7,3 +7,6 @@ secrets/
 __pycache__/
 .pytest_cache/
 .venv/
+# per-host .env profiles (ENV_FILE=config/<name>.env); only the example is shared
+config/*.env
+!config/example.env

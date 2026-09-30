@@ -1,0 +1,9 @@
+# For a venv without Conda (e.g. Ubuntu): pip install -r requirements.txt
+# environment.yml stays the source of truth (Python 3.12).
+fastapi
+uvicorn
+httpx
+pydantic>=2
+python-dotenv
+cryptography
+pytest

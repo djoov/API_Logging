@@ -14,6 +14,15 @@ Format:
 
 ---
 
+## 2026-10-01 00:40 (WIB, jam Windows `Get-Date`) — windows — Persiapan migrasi ke PC Windows + PC Ubuntu
+- Dilakukan (atas permintaan user; menyentuh file milik Kali, dicatat di sini): `scripts/setup_linux.sh`
+  (baru, generik Ubuntu/Kali/Debian, argumen `[PORT] [NODE_NAME]`, cek versi Python ≥3.12, venv,
+  NTP); **`scripts/setup_kali.sh`** kini hanya memanggil `setup_linux.sh <port> kali` (perilaku sama).
+  `requirements.txt` untuk venv. `.gitignore`: `config/*.env` (kecuali `example.env`). README §19
+  (panduan migrasi), `CLAUDE.md` (status + jebakan #12–#13).
+- Hasil: belum ada migrasi; kode tidak perlu diubah (tidak ada IP di logika program, semua dari `.env`).
+- Butuh dari kali: `git pull`; coba `bash scripts/setup_kali.sh` sekali untuk memastikan wrapper jalan.
+
 ## 2026-10-01 00:20 (WIB, jam Windows `Get-Date`) — windows — SELESAI: API OpenAI-compatible (LM Studio)
 - Dilakukan: `llm/openai_protocol.py` (SSE + JSON utuh), gateway `/v1/chat/completions`,
   `/secure/v1/chat/completions`, `GET /v1/models`; mock `/v1/*`; **`client/llm_client.py`**:
